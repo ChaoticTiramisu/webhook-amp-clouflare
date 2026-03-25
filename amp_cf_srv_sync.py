@@ -111,7 +111,7 @@ class AmpCloudflareSync:
                     response.raise_for_status()
                     data = response.json()
                     instances = self.extract_instances(data)
-                    if instances:
+                    if instances is not None:
                         logging.info("Fetched %d AMP instances", len(instances))
                         return instances
                 except Exception as exc:
@@ -122,9 +122,11 @@ class AmpCloudflareSync:
             raise RuntimeError(f"Could not fetch AMP instances from {url}: {last_error}")
         raise RuntimeError(f"Could not fetch AMP instances from {url}")
 
-    def extract_instances(self, payload: Any) -> List[Dict[str, Any]]:
+    def extract_instances(self, payload: Any) -> Optional[List[Dict[str, Any]]]:
         if isinstance(payload, list):
-            return [x for x in payload if isinstance(x, dict)]
+            if all(isinstance(x, dict) for x in payload):
+                return [x for x in payload if isinstance(x, dict)]
+            return None
 
         if isinstance(payload, dict):
             for key in (
@@ -138,14 +140,15 @@ class AmpCloudflareSync:
             ):
                 if key in payload:
                     extracted = self.extract_instances(payload[key])
-                    if extracted:
+                    if extracted is not None:
                         return extracted
 
             for value in payload.values():
-                if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
-                    return value
+                if isinstance(value, list):
+                    if all(isinstance(x, dict) for x in value):
+                        return value
 
-        return []
+        return None
 
     def build_desired_records(self, instances: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         desired: Dict[str, Dict[str, Any]] = {}

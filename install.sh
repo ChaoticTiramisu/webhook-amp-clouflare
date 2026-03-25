@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_REPO_URL="https://github.com/REPLACE_ME/amp-cf-srv-sync.git"
+PLACEHOLDER_REPO_URL="https://github.com/REPLACE_ME/amp-cf-srv-sync.git"
+DEFAULT_REPO_URL="${REPO_URL:-$PLACEHOLDER_REPO_URL}"
 DEFAULT_INSTALL_DIR="/opt/amp-cf-srv-sync"
 
 prompt_default() {
@@ -92,9 +93,11 @@ main() {
   local repo_url
   repo_url="$(prompt_default "GitHub repository URL" "$DEFAULT_REPO_URL")"
 
-  if [[ "$repo_url" == "$DEFAULT_REPO_URL" ]]; then
-    echo "Warning: You still have the placeholder repo URL."
-    echo "Set the real GitHub URL for this project."
+  if [[ "$repo_url" == "$PLACEHOLDER_REPO_URL" ]]; then
+    echo "Error: GitHub repository URL is still the placeholder."
+    echo "Provide your real repo URL when prompted, or run with:"
+    echo "REPO_URL=https://github.com/<user>/<repo>.git bash install.sh"
+    exit 1
   fi
 
   if [[ -d "$install_dir/.git" ]]; then
@@ -216,7 +219,6 @@ ExecStart=$install_dir/.venv/bin/python $install_dir/amp_cf_srv_sync.py
 Restart=always
 RestartSec=5
 User=$run_user
-Group=$run_user
 
 [Install]
 WantedBy=multi-user.target
@@ -227,6 +229,11 @@ EOF
     echo "Systemd service started: amp-cf-srv-sync"
     echo "View logs with: journalctl -u amp-cf-srv-sync -f"
   else
+    echo
+    echo "AMP webhook target URL: http://<LXC-IP>:$webhook_port$webhook_path"
+    if [[ -n "$webhook_token" ]]; then
+      echo "Send header: X-Webhook-Token: <your-token>"
+    fi
     echo "Starting service in foreground..."
     exec ./.venv/bin/python amp_cf_srv_sync.py
   fi

@@ -34,7 +34,7 @@ The same removal also happens on webhook events where an instance is deleted or 
 Run this in your Debian LXC:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<your-user>/<your-repo>/main/install.sh)
+REPO_URL=https://github.com/<your-user>/<your-repo>.git bash <(curl -fsSL https://raw.githubusercontent.com/<your-user>/<your-repo>/main/install.sh)
 ```
 
 The wizard will:
