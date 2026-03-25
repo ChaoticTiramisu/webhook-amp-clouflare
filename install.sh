@@ -9,7 +9,9 @@ prompt_default() {
   local prompt="$1"
   local default="$2"
   local value
-  read -r -p "$prompt [$default]: " value
+  if ! read -r -p "$prompt [$default]: " value; then
+    value=""
+  fi
   if [[ -z "$value" ]]; then
     echo "$default"
   else
@@ -34,7 +36,22 @@ prompt_secret_required() {
   local prompt="$1"
   local value
   while true; do
-    read -r -s -p "$prompt: " value
+    value=""
+    printf "%s: " "$prompt"
+    while IFS= read -r -s -n 1 char; do
+      if [[ "$char" == "" ]]; then
+        break
+      fi
+      if [[ "$char" == $'\177' || "$char" == $'\b' ]]; then
+        if [[ -n "$value" ]]; then
+          value="${value%?}"
+          printf '\b \b'
+        fi
+      else
+        value+="$char"
+        printf '*'
+      fi
+    done
     echo
     if [[ -n "$value" ]]; then
       echo "$value"
@@ -42,6 +59,30 @@ prompt_secret_required() {
     fi
     echo "Value is required."
   done
+}
+
+prompt_secret_optional() {
+  local prompt="$1"
+  local value=""
+  local char
+
+  printf "%s: " "$prompt"
+  while IFS= read -r -s -n 1 char; do
+    if [[ "$char" == "" ]]; then
+      break
+    fi
+    if [[ "$char" == $'\177' || "$char" == $'\b' ]]; then
+      if [[ -n "$value" ]]; then
+        value="${value%?}"
+        printf '\b \b'
+      fi
+    else
+      value+="$char"
+      printf '*'
+    fi
+  done
+  echo
+  echo "$value"
 }
 
 prompt_yes_no() {
@@ -87,6 +128,10 @@ uninstall() {
   
   local install_dir
   install_dir="$(prompt_default "Installation directory to remove" "$DEFAULT_INSTALL_DIR")"
+
+  if [[ -z "$install_dir" ]]; then
+    install_dir="$DEFAULT_INSTALL_DIR"
+  fi
 
   if [[ ! -d "$install_dir" ]]; then
     echo "Error: Directory not found: $install_dir"
@@ -141,6 +186,10 @@ main() {
   local install_dir
   install_dir="$(prompt_default "Install directory" "$DEFAULT_INSTALL_DIR")"
 
+  if [[ -z "$install_dir" ]]; then
+    install_dir="$DEFAULT_INSTALL_DIR"
+  fi
+
   local repo_url="$DEFAULT_REPO_URL"
 
   if [[ -d "$install_dir/.git" ]]; then
@@ -184,8 +233,7 @@ main() {
   webhook_path="$(prompt_default "Webhook path" "/amp-webhook")"
 
   local webhook_token
-  read -r -s -p "Webhook token (optional, press enter to skip): " webhook_token
-  echo
+  webhook_token="$(prompt_secret_optional "Webhook token (optional, press enter to skip)")"
 
   local cloudflare_api_token
   cloudflare_api_token="$(prompt_secret_required "Cloudflare API token")"
