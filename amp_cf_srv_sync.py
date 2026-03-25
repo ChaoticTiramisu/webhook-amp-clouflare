@@ -1,3 +1,4 @@
+import asyncio
 import json
 import ipaddress
 import logging
@@ -10,6 +11,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, request
 import requests
+
+try:
+    from ampapi.adsmodule import ADSModule
+    from ampapi.bridge import Bridge
+    from ampapi.modules import APIParams
+
+    HAS_CC_AMPAPI = True
+except Exception:
+    HAS_CC_AMPAPI = False
 
 
 def load_env_file(path: str) -> None:
@@ -33,8 +43,8 @@ def load_env_file(path: str) -> None:
 @dataclass
 class Config:
     amp_base_url: str
-    amp_api_token: str
-    amp_instance_list_endpoint: str
+    amp_username: str
+    amp_password: str
     periodic_sync_seconds: int
     cloudflare_api_token: str
     cloudflare_zone_id: str
@@ -83,70 +93,88 @@ class AmpCloudflareSync:
                 logging.exception("Periodic sync failed: %s", exc)
 
     def fetch_amp_instances(self) -> List[Dict[str, Any]]:
-        base = self.config.amp_base_url.rstrip("/")
-        endpoint = self.config.amp_instance_list_endpoint
-        if not endpoint.startswith("/"):
-            endpoint = "/" + endpoint
-        url = base + endpoint
+        return self.fetch_amp_instances_via_cc_ampapi()
 
-        headers = {
-            "Authorization": f"Bearer {self.config.amp_api_token}",
-            "x-amp-token": self.config.amp_api_token,
-            "Content-Type": "application/json",
-        }
+    def fetch_amp_instances_via_cc_ampapi(self) -> List[Dict[str, Any]]:
+        if not HAS_CC_AMPAPI:
+            raise RuntimeError(
+                "cc-ampapi is not installed. "
+                "Install dependencies from requirements.txt"
+            )
 
-        payload_candidates = [{}, {"page": 1}, {"SearchTerm": ""}]
-        last_error: Optional[Exception] = None
+        if not self.config.amp_username or not self.config.amp_password:
+            raise RuntimeError(
+                "AMP_USERNAME/AMP_PASSWORD are missing"
+            )
 
-        # AMP API setups vary by version, so try common request styles.
-        for payload in payload_candidates:
-            for method in ("post", "get"):
-                try:
-                    if method == "post":
-                        response = self.http.post(url, headers=headers, json=payload, timeout=20)
-                    else:
-                        response = self.http.get(url, headers=headers, timeout=20)
-                    response.raise_for_status()
-                    data = response.json()
-                    instances = self.extract_instances(data)
-                    if instances is not None:
-                        logging.info("Fetched %d AMP instances", len(instances))
-                        return instances
-                except Exception as exc:
-                    last_error = exc
-                    continue
+        async def _load() -> List[Dict[str, Any]]:
+            params = APIParams(
+                url=self.config.amp_base_url,
+                user=self.config.amp_username,
+                password=self.config.amp_password,
+            )
+            Bridge(api_params=params)
+            ads = ADSModule()
+            ads.format_data = False
+            await ads.get_instances(include_self=False, format_data=False)
 
-        if last_error:
-            raise RuntimeError(f"Could not fetch AMP instances from {url}: {last_error}")
-        raise RuntimeError(f"Could not fetch AMP instances from {url}")
+            rows: List[Dict[str, Any]] = []
+            for attr in ("instances", "available_instances", "AvailableInstances"):
+                value = getattr(ads, attr, None)
+                extracted = self._normalize_cc_ampapi_rows(value)
+                if extracted:
+                    rows.extend(extracted)
 
-    def extract_instances(self, payload: Any) -> Optional[List[Dict[str, Any]]]:
-        if isinstance(payload, list):
-            if all(isinstance(x, dict) for x in payload):
-                return [x for x in payload if isinstance(x, dict)]
-            return None
+            dedup: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                key = (
+                    str(row.get("InstanceID") or row.get("instance_id") or "")
+                    + "|"
+                    + str(row.get("FriendlyName") or row.get("friendly_name") or row.get("InstanceName") or row.get("instance_name") or "")
+                )
+                dedup[key] = row
 
-        if isinstance(payload, dict):
-            for key in (
-                "instances",
-                "Instances",
-                "result",
-                "Result",
-                "data",
-                "Data",
-                "AvailableInstances",
+            return list(dedup.values())
+
+        instances = asyncio.run(_load())
+        logging.info("Fetched %d AMP instances via cc-ampapi", len(instances))
+        return instances
+
+    @staticmethod
+    def _normalize_cc_ampapi_rows(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+
+        items: List[Any]
+        if isinstance(value, (list, set, tuple)):
+            items = list(value)
+        else:
+            items = [value]
+
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+
+            row: Dict[str, Any] = {}
+            for src, dst in (
+                ("friendly_name", "FriendlyName"),
+                ("instance_name", "InstanceName"),
+                ("instance_id", "InstanceID"),
+                ("ip", "IP"),
+                ("host", "Host"),
+                ("address", "Address"),
+                ("public_address", "PublicAddress"),
             ):
-                if key in payload:
-                    extracted = self.extract_instances(payload[key])
-                    if extracted is not None:
-                        return extracted
+                val = getattr(item, src, None)
+                if isinstance(val, str) and val:
+                    row[dst] = val
 
-            for value in payload.values():
-                if isinstance(value, list):
-                    if all(isinstance(x, dict) for x in value):
-                        return value
+            if row:
+                out.append(row)
 
-        return None
+        return out
 
     def build_desired_records(self, instances: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         desired: Dict[str, Dict[str, Any]] = {}
@@ -502,10 +530,16 @@ def parse_config() -> Config:
         if x.strip()
     ]
 
+    amp_username = os.getenv("AMP_USERNAME", "").strip()
+    amp_password = os.getenv("AMP_PASSWORD", "").strip()
+
+    if not amp_username or not amp_password:
+        raise RuntimeError("AMP_USERNAME and AMP_PASSWORD are required")
+
     return Config(
         amp_base_url=get_required_env("AMP_BASE_URL"),
-        amp_api_token=get_required_env("AMP_API_TOKEN"),
-        amp_instance_list_endpoint=os.getenv("AMP_INSTANCE_LIST_ENDPOINT", "/API/ADSModule/GetInstances"),
+        amp_username=amp_username,
+        amp_password=amp_password,
         periodic_sync_seconds=int(os.getenv("PERIODIC_SYNC_SECONDS", "300")),
         cloudflare_api_token=get_required_env("CLOUDFLARE_API_TOKEN"),
         cloudflare_zone_id=get_required_env("CLOUDFLARE_ZONE_ID"),

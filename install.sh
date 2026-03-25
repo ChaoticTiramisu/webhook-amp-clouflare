@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLACEHOLDER_REPO_URL="https://github.com/REPLACE_ME/amp-cf-srv-sync.git"
+PLACEHOLDER_REPO_URL="https://github.com/ChaoticTiramisu/webhook-amp-clouflare.git"
 DEFAULT_REPO_URL="${REPO_URL:-$PLACEHOLDER_REPO_URL}"
 DEFAULT_INSTALL_DIR="/opt/amp-cf-srv-sync"
 
@@ -90,12 +90,11 @@ main() {
   local install_dir
   install_dir="$(prompt_default "Install directory" "$DEFAULT_INSTALL_DIR")"
 
-  local repo_url
-  repo_url="$(prompt_default "GitHub repository URL" "$DEFAULT_REPO_URL")"
+  local repo_url="$DEFAULT_REPO_URL"
 
   if [[ "$repo_url" == "$PLACEHOLDER_REPO_URL" ]]; then
     echo "Error: GitHub repository URL is still the placeholder."
-    echo "Provide your real repo URL when prompted, or run with:"
+    echo "Set your real repo URL with:"
     echo "REPO_URL=https://github.com/<user>/<repo>.git bash install.sh"
     exit 1
   fi
@@ -122,11 +121,11 @@ main() {
   local amp_base_url
   amp_base_url="$(prompt_default "AMP base URL" "http://127.0.0.1:8080")"
 
-  local amp_api_token
-  amp_api_token="$(prompt_secret_required "AMP API token")"
+  local amp_username
+  amp_username="$(prompt_required "AMP username")"
 
-  local amp_instance_list_endpoint
-  amp_instance_list_endpoint="$(prompt_default "AMP instance list endpoint" "/API/ADSModule/GetInstances")"
+  local amp_password
+  amp_password="$(prompt_secret_required "AMP password")"
 
   local periodic_sync_seconds
   periodic_sync_seconds="$(prompt_default "Periodic fallback sync seconds (0 disables)" "300")"
@@ -167,8 +166,8 @@ main() {
 
   cat > .env <<EOF
 AMP_BASE_URL=$amp_base_url
-AMP_API_TOKEN=$amp_api_token
-AMP_INSTANCE_LIST_ENDPOINT=$amp_instance_list_endpoint
+AMP_USERNAME=$amp_username
+AMP_PASSWORD=$amp_password
 PERIODIC_SYNC_SECONDS=$periodic_sync_seconds
 WEBHOOK_HOST=$webhook_host
 WEBHOOK_PORT=$webhook_port

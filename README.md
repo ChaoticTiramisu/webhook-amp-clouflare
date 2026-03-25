@@ -72,7 +72,7 @@ nano .env
 
 Set real values in `.env`:
 - `AMP_BASE_URL`: your AMP ADS URL (example `http://127.0.0.1:8080`)
-- `AMP_API_TOKEN`: AMP API token
+- `AMP_USERNAME` / `AMP_PASSWORD`: AMP web credentials for AMPAPI_Python (`cc-ampapi`)
 - `CLOUDFLARE_API_TOKEN`: Cloudflare API token
 - `CLOUDFLARE_ZONE_ID`: zone id for `cobyas.xyz`
 - `DEFAULT_TARGET`: target hostname/IP if AMP does not expose one
@@ -80,9 +80,6 @@ Set real values in `.env`:
 - `DNS_PROXIED`: usually `false` for game traffic
 - `WEBHOOK_PORT` and `WEBHOOK_PATH`: where AMP will send webhooks
 - `WEBHOOK_TOKEN`: optional shared secret to protect webhook endpoint
-
-If your AMP endpoint differs, update:
-- `AMP_INSTANCE_LIST_ENDPOINT`
 
 ## 5) Configure AMP webhook
 
@@ -134,6 +131,6 @@ journalctl -u amp-cf-srv-sync -f
 ## Notes
 
 - The script is webhook-driven and can also run periodic fallback sync via `PERIODIC_SYNC_SECONDS`.
+- AMP instance discovery uses AMPAPI_Python (`cc-ampapi`).
 - It only edits records that have comments beginning with `amp-sync:`.
 - It creates `A`/`AAAA` for IP targets and `CNAME` for hostname targets.
-- If AMP response shape differs, the script may need key-path tweaks for name/port/target fields.
