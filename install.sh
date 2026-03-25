@@ -82,8 +82,59 @@ ensure_command() {
   fi
 }
 
+uninstall() {
+  echo "== AMP -> Cloudflare DNS uninstaller =="
+  
+  local install_dir
+  install_dir="$(prompt_default "Installation directory to remove" "$DEFAULT_INSTALL_DIR")"
+
+  if [[ ! -d "$install_dir" ]]; then
+    echo "Error: Directory not found: $install_dir"
+    exit 1
+  fi
+
+  local confirm
+  confirm="$(prompt_yes_no "Remove $install_dir and all its contents?" "N")"
+  
+  if [[ "$confirm" != "yes" ]]; then
+    echo "Uninstall cancelled."
+    exit 0
+  fi
+
+  # Stop and disable systemd service if it exists
+  if systemctl is-active --quiet amp-cf-srv-sync 2>/dev/null; then
+    echo "Stopping systemd service..."
+    sudo systemctl stop amp-cf-srv-sync
+  fi
+
+  if systemctl is-enabled amp-cf-srv-sync 2>/dev/null; then
+    echo "Disabling systemd service..."
+    sudo systemctl disable amp-cf-srv-sync
+  fi
+
+  if [[ -f /etc/systemd/system/amp-cf-srv-sync.service ]]; then
+    echo "Removing systemd service file..."
+    sudo rm /etc/systemd/system/amp-cf-srv-sync.service
+    sudo systemctl daemon-reload
+  fi
+
+  # Remove installation directory
+  echo "Removing installation directory: $install_dir"
+  sudo rm -rf "$install_dir"
+
+  echo "✓ Uninstall complete"
+}
+
 main() {
-  echo "== AMP -> Cloudflare DNS interactive installer =="
+  echo "== AMP -> Cloudflare DNS installer =="
+  
+  local action
+  action="$(prompt_yes_no "Install (Y) or Uninstall (N)?" "Y")"
+
+  if [[ "$action" != "yes" ]]; then
+    uninstall
+    exit 0
+  fi
   ensure_command git
   ensure_command python3
 

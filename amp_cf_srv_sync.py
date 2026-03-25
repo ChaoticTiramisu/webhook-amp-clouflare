@@ -7,9 +7,8 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from flask import Flask, jsonify, request
 import requests
 
 try:
@@ -53,10 +52,6 @@ class Config:
     dns_proxied: bool
     default_target: str
     ignored_names: List[str]
-    webhook_host: str
-    webhook_port: int
-    webhook_path: str
-    webhook_token: str
 
 
 class AmpCloudflareSync:
@@ -77,20 +72,7 @@ class AmpCloudflareSync:
         existing_managed = self.list_existing_managed_dns_records()
         self.reconcile(desired, existing_managed)
 
-    def run_periodic_loop(self) -> None:
-        if self.config.periodic_sync_seconds <= 0:
-            logging.info("Periodic sync disabled")
-            return
 
-        logging.info(
-            "Periodic sync enabled every %d seconds", self.config.periodic_sync_seconds
-        )
-        while True:
-            time.sleep(self.config.periodic_sync_seconds)
-            try:
-                self.run_sync("periodic")
-            except Exception as exc:
-                logging.exception("Periodic sync failed: %s", exc)
 
     def fetch_amp_instances(self) -> List[Dict[str, Any]]:
         return self.fetch_amp_instances_via_cc_ampapi()
@@ -447,71 +429,20 @@ class AmpCloudflareSync:
             return default
         return raw in ("1", "true", "yes", "y", "on")
 
+    def run_periodic_loop(self) -> None:
+        if self.config.periodic_sync_seconds <= 0:
+            logging.info("Periodic sync disabled")
+            return
 
-class WebhookServer:
-    def __init__(self, config: Config, syncer: AmpCloudflareSync) -> None:
-        self.config = config
-        self.syncer = syncer
-        self.app = Flask(__name__)
-        self._register_routes()
-
-    def _register_routes(self) -> None:
-        @self.app.get("/healthz")
-        def healthz() -> Tuple[str, int]:
-            return "ok", 200
-
-        @self.app.post(self.config.webhook_path)
-        def webhook() -> Tuple[Any, int]:
-            if not self._is_webhook_authorized(request):
-                return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-            payload = request.get_json(silent=True) or {}
-            event_name = self._extract_event_name(payload)
-            logging.info("Received AMP webhook event: %s", event_name)
-
-            try:
-                # A full reconcile on each webhook keeps behavior correct across create/rename/delete.
-                self.syncer.run_sync(f"webhook:{event_name}")
-            except Exception as exc:
-                logging.exception("Webhook sync failed: %s", exc)
-                return jsonify({"ok": False, "error": str(exc)}), 500
-
-            return jsonify({"ok": True, "event": event_name}), 200
-
-    def _is_webhook_authorized(self, req: Any) -> bool:
-        token = self.config.webhook_token.strip()
-        if not token:
-            return True
-
-        header_token = (req.headers.get("X-Webhook-Token") or "").strip()
-        auth = (req.headers.get("Authorization") or "").strip()
-        bearer_token = ""
-        if auth.lower().startswith("bearer "):
-            bearer_token = auth[7:].strip()
-
-        return token in (header_token, bearer_token)
-
-    @staticmethod
-    def _extract_event_name(payload: Dict[str, Any]) -> str:
-        for key in ("event", "Event", "type", "Type", "name", "Name"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return "unknown"
-
-    def run(self) -> None:
         logging.info(
-            "Starting webhook listener on %s:%d%s",
-            self.config.webhook_host,
-            self.config.webhook_port,
-            self.config.webhook_path,
+            "Periodic sync enabled every %d seconds", self.config.periodic_sync_seconds
         )
-        self.app.run(
-            host=self.config.webhook_host,
-            port=self.config.webhook_port,
-            debug=False,
-            use_reloader=False,
-        )
+        while True:
+            time.sleep(self.config.periodic_sync_seconds)
+            try:
+                self.run_sync("periodic")
+            except Exception as exc:
+                logging.exception("Periodic sync failed: %s", exc)
 
 
 def get_required_env(name: str) -> str:
@@ -540,7 +471,7 @@ def parse_config() -> Config:
         amp_base_url=get_required_env("AMP_BASE_URL"),
         amp_username=amp_username,
         amp_password=amp_password,
-        periodic_sync_seconds=int(os.getenv("PERIODIC_SYNC_SECONDS", "300")),
+        periodic_sync_seconds=int(os.getenv("PERIODIC_SYNC_SECONDS", "10")),
         cloudflare_api_token=get_required_env("CLOUDFLARE_API_TOKEN"),
         cloudflare_zone_id=get_required_env("CLOUDFLARE_ZONE_ID"),
         allowed_domain=os.getenv("ALLOWED_DOMAIN", "cobyas.xyz").strip(".").lower(),
@@ -561,17 +492,28 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
     config = parse_config()
     sync = AmpCloudflareSync(config)
 
-    # Ensure DNS starts in a correct state before webhook events arrive.
+    # Ensure DNS starts in a correct state on startup.
     sync.run_sync("startup")
 
+    # Start periodic sync loop.
     periodic_thread = threading.Thread(target=sync.run_periodic_loop, daemon=True)
     periodic_thread.start()
 
-    server = WebhookServer(config, sync)
-    server.run()
+    # Keep main thread alive.
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("Shutting down...")
 
 
 if __name__ == "__main__":
