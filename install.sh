@@ -83,7 +83,7 @@ ensure_command() {
 }
 
 main() {
-  echo "== AMP -> Cloudflare SRV interactive installer =="
+  echo "== AMP -> Cloudflare DNS interactive installer =="
   ensure_command git
   ensure_command python3
 
@@ -153,20 +153,11 @@ main() {
   local allowed_domain
   allowed_domain="$(prompt_default "Allowed domain" "cobyas.xyz")"
 
-  local srv_service
-  srv_service="$(prompt_default "SRV service" "_minecraft")"
+  local dns_ttl
+  dns_ttl="$(prompt_default "DNS TTL" "60")"
 
-  local srv_proto
-  srv_proto="$(prompt_default "SRV proto" "_tcp")"
-
-  local srv_priority
-  srv_priority="$(prompt_default "SRV priority" "0")"
-
-  local srv_weight
-  srv_weight="$(prompt_default "SRV weight" "0")"
-
-  local srv_ttl
-  srv_ttl="$(prompt_default "SRV TTL" "60")"
+  local dns_proxied
+  dns_proxied="$(prompt_default "DNS proxied (true/false)" "false")"
 
   local default_target
   default_target="$(prompt_default "Default target host/IP (optional)" "")"
@@ -186,11 +177,8 @@ WEBHOOK_TOKEN=$webhook_token
 CLOUDFLARE_API_TOKEN=$cloudflare_api_token
 CLOUDFLARE_ZONE_ID=$cloudflare_zone_id
 ALLOWED_DOMAIN=$allowed_domain
-SRV_SERVICE=$srv_service
-SRV_PROTO=$srv_proto
-SRV_PRIORITY=$srv_priority
-SRV_WEIGHT=$srv_weight
-SRV_TTL=$srv_ttl
+DNS_TTL=$dns_ttl
+DNS_PROXIED=$dns_proxied
 DEFAULT_TARGET=$default_target
 IGNORE_INSTANCE_NAMES=$ignore_instance_names
 EOF
@@ -208,7 +196,7 @@ EOF
 
     sudo tee /etc/systemd/system/amp-cf-srv-sync.service >/dev/null <<EOF
 [Unit]
-Description=AMP to Cloudflare SRV sync
+Description=AMP to Cloudflare DNS sync
 After=network-online.target
 Wants=network-online.target
 

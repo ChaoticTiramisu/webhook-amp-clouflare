@@ -1,5 +1,5 @@
 [Unit]
-Description=AMP to Cloudflare SRV sync
+Description=AMP to Cloudflare DNS sync
 After=network-online.target
 Wants=network-online.target
 

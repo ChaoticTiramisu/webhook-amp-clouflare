@@ -1,4 +1,5 @@
 import json
+import ipaddress
 import logging
 import os
 import re
@@ -38,11 +39,8 @@ class Config:
     cloudflare_api_token: str
     cloudflare_zone_id: str
     allowed_domain: str
-    srv_service: str
-    srv_proto: str
-    srv_priority: int
-    srv_weight: int
-    srv_ttl: int
+    dns_ttl: int
+    dns_proxied: bool
     default_target: str
     ignored_names: List[str]
     webhook_host: str
@@ -66,7 +64,7 @@ class AmpCloudflareSync:
     def sync_once(self) -> None:
         instances = self.fetch_amp_instances()
         desired = self.build_desired_records(instances)
-        existing_managed = self.list_existing_managed_srv_records()
+        existing_managed = self.list_existing_managed_dns_records()
         self.reconcile(desired, existing_managed)
 
     def run_periodic_loop(self) -> None:
@@ -175,16 +173,6 @@ class AmpCloudflareSync:
             if not subdomain:
                 continue
 
-            port = self.pick_first_int(
-                instance,
-                ["Port", "port", "GamePort", "DefaultPort", "RunningPort", "PrimaryPort"],
-            )
-            if port is None:
-                logging.warning(
-                    "Skipping '%s' (id=%s) because no port could be found", raw_name, instance_id
-                )
-                continue
-
             target = self.pick_first_str(
                 instance,
                 ["IP", "Ip", "ip", "Address", "Host", "Hostname", "PublicAddress", "Target"],
@@ -197,22 +185,22 @@ class AmpCloudflareSync:
                 continue
 
             target = target.rstrip(".")
-            record_name = f"{self.config.srv_service}.{self.config.srv_proto}.{subdomain}"
+            record_type = self.infer_record_type(target)
             comment = f"amp-sync:{instance_id}"
 
             desired[comment] = {
-                "record_name": record_name,
+                "record_name": subdomain,
+                "record_type": record_type,
+                "content": target,
                 "subdomain": subdomain,
-                "port": port,
-                "target": target,
                 "comment": comment,
                 "instance_name": raw_name,
             }
 
-        logging.info("Desired managed SRV records this cycle: %d", len(desired))
+        logging.info("Desired managed DNS records this cycle: %d", len(desired))
         return desired
 
-    def list_existing_managed_srv_records(self) -> Dict[str, List[Dict[str, Any]]]:
+    def list_existing_managed_dns_records(self) -> Dict[str, List[Dict[str, Any]]]:
         records_by_comment: Dict[str, List[Dict[str, Any]]] = {}
         page = 1
 
@@ -220,7 +208,7 @@ class AmpCloudflareSync:
             result = self.cloudflare_request(
                 "GET",
                 f"/zones/{self.config.cloudflare_zone_id}/dns_records",
-                params={"type": "SRV", "page": page, "per_page": 500},
+                params={"page": page, "per_page": 500},
             )
 
             records = result.get("result", [])
@@ -275,10 +263,10 @@ class AmpCloudflareSync:
             json_data=payload,
         )
         logging.info(
-            "Created SRV %s -> %s:%s for instance '%s'",
+            "Created %s %s -> %s for instance '%s'",
+            want["record_type"],
             want["record_name"],
-            want["target"],
-            want["port"],
+            want["content"],
             want["instance_name"],
         )
 
@@ -290,10 +278,10 @@ class AmpCloudflareSync:
             json_data=payload,
         )
         logging.info(
-            "Updated SRV %s -> %s:%s for instance '%s'",
+            "Updated %s %s -> %s for instance '%s'",
+            want["record_type"],
             want["record_name"],
-            want["target"],
-            want["port"],
+            want["content"],
             want["instance_name"],
         )
 
@@ -302,7 +290,7 @@ class AmpCloudflareSync:
             "DELETE",
             f"/zones/{self.config.cloudflare_zone_id}/dns_records/{record_id}",
         )
-        logging.info("Deleted managed SRV record %s", record_name)
+        logging.info("Deleted managed DNS record %s", record_name)
 
     def record_matches(self, existing: Dict[str, Any], want: Dict[str, Any]) -> bool:
         existing_name = (existing.get("name") or "").lower().strip(".")
@@ -311,37 +299,34 @@ class AmpCloudflareSync:
         if existing_name != want_name:
             return False
 
-        if int(existing.get("ttl") or 1) != int(self.config.srv_ttl):
+        if (existing.get("type") or "").upper() != want["record_type"]:
             return False
 
-        data = existing.get("data") or {}
-        checks: List[Tuple[Any, Any]] = [
-            (str(data.get("service") or ""), self.config.srv_service),
-            (str(data.get("proto") or ""), self.config.srv_proto),
-            (str(data.get("name") or ""), want["subdomain"]),
-            (int(data.get("priority") or 0), self.config.srv_priority),
-            (int(data.get("weight") or 0), self.config.srv_weight),
-            (int(data.get("port") or 0), int(want["port"])),
-            (str(data.get("target") or "").rstrip("."), want["target"].rstrip(".")),
-        ]
-        return all(current == expected for current, expected in checks)
+        if int(existing.get("ttl") or 1) != int(self.config.dns_ttl):
+            return False
+
+        existing_content = str(existing.get("content") or "").rstrip(".")
+        want_content = str(want["content"]).rstrip(".")
+        if existing_content != want_content:
+            return False
+
+        existing_proxied = bool(existing.get("proxied", False))
+        if existing_proxied != self.config.dns_proxied:
+            return False
+
+        return True
 
     def make_record_payload(self, want: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "type": "SRV",
+        payload = {
+            "type": want["record_type"],
             "name": want["record_name"],
-            "ttl": self.config.srv_ttl,
+            "content": want["content"],
+            "ttl": self.config.dns_ttl,
             "comment": want["comment"],
-            "data": {
-                "service": self.config.srv_service,
-                "proto": self.config.srv_proto,
-                "name": want["subdomain"],
-                "priority": self.config.srv_priority,
-                "weight": self.config.srv_weight,
-                "port": int(want["port"]),
-                "target": want["target"],
-            },
         }
+        if want["record_type"] in ("A", "AAAA", "CNAME"):
+            payload["proxied"] = self.config.dns_proxied
+        return payload
 
     def cloudflare_request(
         self,
@@ -416,6 +401,23 @@ class AmpCloudflareSync:
             return None
 
         return subdomain
+
+    @staticmethod
+    def infer_record_type(target: str) -> str:
+        try:
+            ip = ipaddress.ip_address(target)
+            if isinstance(ip, ipaddress.IPv4Address):
+                return "A"
+            return "AAAA"
+        except ValueError:
+            return "CNAME"
+
+    @staticmethod
+    def parse_bool(value: str, default: bool = False) -> bool:
+        raw = (value or "").strip().lower()
+        if not raw:
+            return default
+        return raw in ("1", "true", "yes", "y", "on")
 
 
 class WebhookServer:
@@ -508,11 +510,8 @@ def parse_config() -> Config:
         cloudflare_api_token=get_required_env("CLOUDFLARE_API_TOKEN"),
         cloudflare_zone_id=get_required_env("CLOUDFLARE_ZONE_ID"),
         allowed_domain=os.getenv("ALLOWED_DOMAIN", "cobyas.xyz").strip(".").lower(),
-        srv_service=os.getenv("SRV_SERVICE", "_minecraft"),
-        srv_proto=os.getenv("SRV_PROTO", "_tcp"),
-        srv_priority=int(os.getenv("SRV_PRIORITY", "0")),
-        srv_weight=int(os.getenv("SRV_WEIGHT", "0")),
-        srv_ttl=int(os.getenv("SRV_TTL", "60")),
+        dns_ttl=int(os.getenv("DNS_TTL", "60")),
+        dns_proxied=AmpCloudflareSync.parse_bool(os.getenv("DNS_PROXIED", "false"), default=False),
         default_target=os.getenv("DEFAULT_TARGET", "").strip(),
         ignored_names=ignored,
         webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),

@@ -1,6 +1,6 @@
-# AMP -> Cloudflare SRV auto-sync
+# AMP -> Cloudflare hostname auto-sync
 
-This service keeps Cloudflare `SRV` records synced from AMP instances.
+This service keeps Cloudflare hostname records (`A`/`AAAA`/`CNAME`) synced from AMP instances.
 
 Yes, it can prompt for your Cloudflare API token interactively.
 
@@ -10,15 +10,15 @@ Mode:
 
 Rules it enforces:
 - Only AMP instance names ending in `*.cobyas.xyz` are managed.
-- If an AMP instance name changes away from `*.cobyas.xyz`, its managed SRV record is removed.
+- If an AMP instance name changes away from `*.cobyas.xyz`, its managed DNS record is removed.
 - Records are tagged with comment `amp-sync:<instance_id>` so only managed records are touched.
 
 ## What this solves
 
 If you name an AMP instance as a full domain, for example `survival.cobyas.xyz`, this script creates/updates:
-- `_minecraft._tcp.survival.cobyas.xyz` (customizable service/proto)
+- `survival.cobyas.xyz` as `A` / `AAAA` / `CNAME` depending on instance target
 
-When that instance is renamed to something not ending in `.cobyas.xyz`, the managed SRV record is deleted automatically.
+When that instance is renamed to something not ending in `.cobyas.xyz`, the managed DNS record is deleted automatically.
 
 The same removal also happens on webhook events where an instance is deleted or renamed away from that domain.
 
@@ -76,6 +76,8 @@ Set real values in `.env`:
 - `CLOUDFLARE_API_TOKEN`: Cloudflare API token
 - `CLOUDFLARE_ZONE_ID`: zone id for `cobyas.xyz`
 - `DEFAULT_TARGET`: target hostname/IP if AMP does not expose one
+- `DNS_TTL`: DNS record TTL
+- `DNS_PROXIED`: usually `false` for game traffic
 - `WEBHOOK_PORT` and `WEBHOOK_PATH`: where AMP will send webhooks
 - `WEBHOOK_TOKEN`: optional shared secret to protect webhook endpoint
 
@@ -110,7 +112,7 @@ cd /opt/amp-cf-srv-sync
 
 Watch logs for:
 - Received webhook event
-- Created/Updated/Deleted SRV records
+- Created/Updated/Deleted DNS records
 
 Stop with `Ctrl+C` after validation.
 
@@ -133,4 +135,5 @@ journalctl -u amp-cf-srv-sync -f
 
 - The script is webhook-driven and can also run periodic fallback sync via `PERIODIC_SYNC_SECONDS`.
 - It only edits records that have comments beginning with `amp-sync:`.
+- It creates `A`/`AAAA` for IP targets and `CNAME` for hostname targets.
 - If AMP response shape differs, the script may need key-path tweaks for name/port/target fields.
