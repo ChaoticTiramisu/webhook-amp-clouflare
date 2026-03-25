@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional
 import requests
 
 try:
-    from ampapi.adsmodule import ADSModule
     from ampapi.bridge import Bridge
+    from ampapi.controller import AMPControllerInstance
     from ampapi.modules import APIParams
 
     HAS_CC_AMPAPI = True
@@ -89,23 +89,46 @@ class AmpCloudflareSync:
                 "AMP_USERNAME/AMP_PASSWORD are missing"
             )
 
-        async def _load() -> List[Dict[str, Any]]:
-            params = APIParams(
-                url=self.config.amp_base_url,
-                user=self.config.amp_username,
-                password=self.config.amp_password,
-            )
-            Bridge(api_params=params)
-            ads = ADSModule()
-            ads.format_data = False
-            await ads.get_instances(include_self=False, format_data=False)
+        params = APIParams(
+            url=self.config.amp_base_url,
+            user=self.config.amp_username,
+            password=self.config.amp_password,
+        )
+        Bridge(api_params=params)
+        controller = AMPControllerInstance()
+        controller.format_data = False
 
+        async def _load(ctrl: AMPControllerInstance) -> List[Dict[str, Any]]:
             rows: List[Dict[str, Any]] = []
-            for attr in ("instances", "available_instances", "AvailableInstances"):
-                value = getattr(ads, attr, None)
-                extracted = self._normalize_cc_ampapi_rows(value)
-                if extracted:
-                    rows.extend(extracted)
+
+            try:
+                # Some cc-ampapi versions return instances directly, others expose attrs.
+                result = await ctrl.get_instances(include_self=False, format_data=False)
+                rows.extend(self._normalize_cc_ampapi_rows(result))
+
+                for attr in ("instances", "available_instances", "AvailableInstances"):
+                    value = getattr(ctrl, attr, None)
+                    extracted = self._normalize_cc_ampapi_rows(value)
+                    if extracted:
+                        rows.extend(extracted)
+
+                # Fallback: in some AMP setups only include_self=True returns usable data.
+                if not rows:
+                    result_self = await ctrl.get_instances(include_self=True, format_data=False)
+                    rows.extend(self._normalize_cc_ampapi_rows(result_self))
+                    for attr in ("instances", "available_instances", "AvailableInstances"):
+                        value = getattr(ctrl, attr, None)
+                        extracted = self._normalize_cc_ampapi_rows(value)
+                        if extracted:
+                            rows.extend(extracted)
+            finally:
+                close_coro = getattr(ctrl, "__adel__", None)
+                if callable(close_coro):
+                    await close_coro()
+                else:
+                    session = getattr(ctrl, "session", None)
+                    if session is not None and not session.closed:
+                        await session.close()
 
             dedup: Dict[str, Dict[str, Any]] = {}
             for row in rows:
@@ -118,7 +141,8 @@ class AmpCloudflareSync:
 
             return list(dedup.values())
 
-        instances = asyncio.run(_load())
+        instances = asyncio.run(_load(controller))
+        controller.session = None
         logging.info("Fetched %d AMP instances via cc-ampapi", len(instances))
         return instances
 
@@ -126,6 +150,20 @@ class AmpCloudflareSync:
     def _normalize_cc_ampapi_rows(value: Any) -> List[Dict[str, Any]]:
         if value is None:
             return []
+
+        # Handle wrapper objects (e.g., ActionResult) that carry list-like payloads.
+        if hasattr(value, "result"):
+            inner = getattr(value, "result", None)
+            if inner is not None:
+                value = inner
+        if hasattr(value, "available_instances"):
+            inner = getattr(value, "available_instances", None)
+            if inner is not None:
+                value = inner
+        if hasattr(value, "instances"):
+            inner = getattr(value, "instances", None)
+            if inner is not None:
+                value = inner
 
         items: List[Any]
         if isinstance(value, (list, set, tuple)):
@@ -136,7 +174,26 @@ class AmpCloudflareSync:
         out: List[Dict[str, Any]] = []
         for item in items:
             if isinstance(item, dict):
-                out.append(item)
+                nested_available = item.get("available_instances")
+                if isinstance(nested_available, (list, tuple, set)):
+                    out.extend(AmpCloudflareSync._normalize_cc_ampapi_rows(nested_available))
+
+                nested_instances = item.get("instances")
+                if isinstance(nested_instances, (list, tuple, set)):
+                    out.extend(AmpCloudflareSync._normalize_cc_ampapi_rows(nested_instances))
+
+                if any(
+                    k in item
+                    for k in (
+                        "FriendlyName",
+                        "friendly_name",
+                        "InstanceName",
+                        "instance_name",
+                        "Name",
+                        "name",
+                    )
+                ):
+                    out.append(item)
                 continue
 
             row: Dict[str, Any] = {}
@@ -165,7 +222,18 @@ class AmpCloudflareSync:
         for instance in instances:
             raw_name = self.pick_first_str(
                 instance,
-                ["FriendlyName", "DisplayName", "InstanceName", "Name", "Title"],
+                [
+                    "FriendlyName",
+                    "friendly_name",
+                    "DisplayName",
+                    "display_name",
+                    "InstanceName",
+                    "instance_name",
+                    "Name",
+                    "name",
+                    "Title",
+                    "title",
+                ],
             )
             if not raw_name:
                 continue
@@ -176,7 +244,17 @@ class AmpCloudflareSync:
 
             instance_id = self.pick_first_str(
                 instance,
-                ["InstanceID", "instanceId", "Id", "ID", "UUID", "Guid", "GUID"],
+                [
+                    "InstanceID",
+                    "instance_id",
+                    "instanceId",
+                    "Id",
+                    "id",
+                    "ID",
+                    "UUID",
+                    "Guid",
+                    "GUID",
+                ],
             ) or instance_name
 
             subdomain = self.extract_subdomain(instance_name, domain)
