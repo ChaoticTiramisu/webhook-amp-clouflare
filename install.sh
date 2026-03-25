@@ -9,7 +9,7 @@ prompt_default() {
   local prompt="$1"
   local default="$2"
   local value
-  if ! read -r -p "$prompt [$default]: " value; then
+  if ! read -r -p "$prompt [$default]: " value < /dev/tty; then
     value=""
   fi
   if [[ -z "$value" ]]; then
@@ -23,12 +23,15 @@ prompt_required() {
   local prompt="$1"
   local value
   while true; do
-    read -r -p "$prompt: " value
+    if ! read -r -p "$prompt: " value < /dev/tty; then
+      echo "Input canceled or unavailable." >&2
+      exit 1
+    fi
     if [[ -n "$value" ]]; then
       echo "$value"
       return
     fi
-    echo "Value is required."
+    echo "Value is required." >&2
   done
 }
 
@@ -94,7 +97,10 @@ prompt_yes_no() {
   normalized_default="$(echo "$default" | tr '[:upper:]' '[:lower:]')"
 
   while true; do
-    read -r -p "$prompt [$default]: " value
+    if ! read -r -p "$prompt [$default]: " value < /dev/tty; then
+      echo "Input canceled or unavailable." >&2
+      exit 1
+    fi
     value="$(echo "$value" | tr '[:upper:]' '[:lower:]')"
 
     if [[ -z "$value" ]]; then
