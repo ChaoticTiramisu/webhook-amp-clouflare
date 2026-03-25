@@ -1,0 +1,16 @@
+[Unit]
+Description=AMP to Cloudflare SRV sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/amp-cf-srv-sync
+ExecStart=/opt/amp-cf-srv-sync/.venv/bin/python /opt/amp-cf-srv-sync/amp_cf_srv_sync.py
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
