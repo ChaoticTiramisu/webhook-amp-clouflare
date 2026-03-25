@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import os
 import re
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ class Config:
     dns_proxied: bool
     default_target: str
     ignored_names: List[str]
+    public_ip_source_record: str
+    prefer_public_ip_source: bool
 
 
 class AmpCloudflareSync:
@@ -218,6 +221,7 @@ class AmpCloudflareSync:
     def build_desired_records(self, instances: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         desired: Dict[str, Dict[str, Any]] = {}
         domain = self.config.allowed_domain.lower().strip(".")
+        public_target = self.get_public_target_from_cloudflare()
 
         for instance in instances:
             raw_name = self.pick_first_str(
@@ -261,10 +265,19 @@ class AmpCloudflareSync:
             if not subdomain:
                 continue
 
-            target = self.pick_first_str(
+            amp_target = self.pick_first_str(
                 instance,
                 ["IP", "Ip", "ip", "Address", "Host", "Hostname", "PublicAddress", "Target"],
-            ) or self.config.default_target
+            )
+
+            target = amp_target
+            if public_target and (
+                self.config.prefer_public_ip_source or self.is_private_or_loopback_target(amp_target)
+            ):
+                target = public_target
+
+            if not target:
+                target = self.config.default_target
 
             if not target:
                 logging.warning(
@@ -287,6 +300,66 @@ class AmpCloudflareSync:
 
         logging.info("Desired managed DNS records this cycle: %d", len(desired))
         return desired
+
+    def get_public_target_from_cloudflare(self) -> Optional[str]:
+        source = self.config.public_ip_source_record.strip().lower().rstrip(".")
+        if not source:
+            return None
+
+        if "." not in source:
+            source = f"{source}.{self.config.allowed_domain}"
+
+        result = self.cloudflare_request(
+            "GET",
+            f"/zones/{self.config.cloudflare_zone_id}/dns_records",
+            params={"name": source, "per_page": 100},
+        )
+
+        records = result.get("result", [])
+        if not records:
+            logging.warning("PUBLIC_IP_SOURCE_RECORD '%s' not found in Cloudflare", source)
+            return None
+
+        # Prefer A/AAAA over CNAME; record order matters for deterministic behavior.
+        sorted_records = sorted(
+            records,
+            key=lambda r: {"A": 0, "AAAA": 1, "CNAME": 2}.get((r.get("type") or "").upper(), 99),
+        )
+        for record in sorted_records:
+            content = (record.get("content") or "").strip().rstrip(".")
+            if content:
+                return content
+
+        return None
+
+    @staticmethod
+    def is_private_or_loopback_target(target: Optional[str]) -> bool:
+        if not target:
+            return True
+
+        value = target.strip().rstrip(".")
+        if not value:
+            return True
+
+        try:
+            ip = ipaddress.ip_address(value)
+            return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(value, None)
+            except socket.gaierror:
+                return False
+
+            for info in infos:
+                addr = info[4][0]
+                try:
+                    ip = ipaddress.ip_address(addr)
+                except ValueError:
+                    continue
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+
+            return False
 
     def list_existing_managed_dns_records(self) -> Dict[str, List[Dict[str, Any]]]:
         records_by_comment: Dict[str, List[Dict[str, Any]]] = {}
@@ -557,6 +630,10 @@ def parse_config() -> Config:
         dns_proxied=AmpCloudflareSync.parse_bool(os.getenv("DNS_PROXIED", "false"), default=False),
         default_target=os.getenv("DEFAULT_TARGET", "").strip(),
         ignored_names=ignored,
+        public_ip_source_record=os.getenv("PUBLIC_IP_SOURCE_RECORD", "").strip(),
+        prefer_public_ip_source=AmpCloudflareSync.parse_bool(
+            os.getenv("PREFER_PUBLIC_IP_SOURCE", "true"), default=True
+        ),
     )
 
 

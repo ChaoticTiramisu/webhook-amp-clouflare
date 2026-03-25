@@ -4,6 +4,8 @@ This project keeps Cloudflare DNS records in sync with AMP instances using AMPAP
 
 It runs as a periodic sync service (default every 10 seconds) and does not require webhook configuration.
 
+If you already run a Cloudflare DDNS updater in another LXC, this service can read that DDNS record and use it as the target for game DNS records.
+
 ## Behavior
 
 - Only instances with names ending in the configured domain are managed.
@@ -65,6 +67,8 @@ Common optional values:
 - `DNS_TTL` (default `60`)
 - `DNS_PROXIED` (default `false`)
 - `DEFAULT_TARGET` (used when AMP does not provide a target)
+- `PUBLIC_IP_SOURCE_RECORD` (Cloudflare record to read public target from, for example `home.cobyas.xyz`)
+- `PREFER_PUBLIC_IP_SOURCE` (default `true`; if `false`, only used when AMP target is private/loopback/missing)
 - `IGNORE_INSTANCE_NAMES` (comma-separated names to skip)
 
 ## Manual Run

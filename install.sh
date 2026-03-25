@@ -194,6 +194,12 @@ main() {
   local default_target
   default_target="$(prompt_default "Default target host/IP (optional)" "")"
 
+  local public_ip_source_record
+  public_ip_source_record="$(prompt_default "Public IP source record (optional, e.g. home.cobyas.xyz)" "")"
+
+  local prefer_public_ip_source
+  prefer_public_ip_source="$(prompt_default "Prefer public IP source record (true/false)" "true")"
+
   local ignore_instance_names
   ignore_instance_names="$(prompt_default "Ignore instance names CSV (optional)" "")"
 
@@ -208,6 +214,8 @@ ALLOWED_DOMAIN=$allowed_domain
 DNS_TTL=$dns_ttl
 DNS_PROXIED=$dns_proxied
 DEFAULT_TARGET=$default_target
+PUBLIC_IP_SOURCE_RECORD=$public_ip_source_record
+PREFER_PUBLIC_IP_SOURCE=$prefer_public_ip_source
 IGNORE_INSTANCE_NAMES=$ignore_instance_names
 EOF
 
