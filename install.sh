@@ -218,7 +218,7 @@ main() {
   amp_username="$(prompt_required "AMP username")"
 
   local amp_password
-  amp_password="$(prompt_secret_required "AMP password")"
+  amp_password="$(prompt_required "AMP password")"
 
   local periodic_sync_seconds
   periodic_sync_seconds="$(prompt_default "Periodic fallback sync seconds (0 disables)" "300")"
@@ -233,10 +233,10 @@ main() {
   webhook_path="$(prompt_default "Webhook path" "/amp-webhook")"
 
   local webhook_token
-  webhook_token="$(prompt_secret_optional "Webhook token (optional, press enter to skip)")"
+  webhook_token="$(prompt_default "Webhook token (optional, press enter to skip)" "")"
 
   local cloudflare_api_token
-  cloudflare_api_token="$(prompt_secret_required "Cloudflare API token")"
+  cloudflare_api_token="$(prompt_required "Cloudflare API token")"
 
   local cloudflare_zone_id
   cloudflare_zone_id="$(prompt_required "Cloudflare zone ID (for cobyas.xyz)")"
