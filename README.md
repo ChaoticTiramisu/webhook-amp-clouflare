@@ -1,136 +1,95 @@
-# AMP -> Cloudflare hostname auto-sync
+# AMP -> Cloudflare DNS sync
 
-This service keeps Cloudflare hostname records (`A`/`AAAA`/`CNAME`) synced from AMP instances.
+This project keeps Cloudflare DNS records in sync with AMP instances using AMPAPI_Python (`cc-ampapi`).
 
-Yes, it can prompt for your Cloudflare API token interactively.
+It runs as a periodic sync service (default every 10 seconds) and does not require webhook configuration.
 
-Mode:
-- Webhook-driven: AMP calls this service when instance state/name changes.
-- Periodic fallback sync: optional safety reconcile every N seconds.
+## Behavior
 
-Rules it enforces:
-- Only AMP instance names ending in `*.cobyas.xyz` are managed.
-- If an AMP instance name changes away from `*.cobyas.xyz`, its managed DNS record is removed.
-- Records are tagged with comment `amp-sync:<instance_id>` so only managed records are touched.
+- Only instances with names ending in the configured domain are managed.
+	- Example: if `ALLOWED_DOMAIN=cobyas.xyz`, instance name `survival.cobyas.xyz` is managed.
+- Records are tagged with comments like `amp-sync:<instance_id>`.
+- Only records tagged with `amp-sync:` are created, updated, or deleted by this tool.
+- Record type is inferred from target:
+	- IPv4 -> `A`
+	- IPv6 -> `AAAA`
+	- hostname -> `CNAME`
 
-## What this solves
+## Files
 
-If you name an AMP instance as a full domain, for example `survival.cobyas.xyz`, this script creates/updates:
-- `survival.cobyas.xyz` as `A` / `AAAA` / `CNAME` depending on instance target
-
-When that instance is renamed to something not ending in `.cobyas.xyz`, the managed DNS record is deleted automatically.
-
-The same removal also happens on webhook events where an instance is deleted or renamed away from that domain.
-
-## 1) Files
-
-- `amp_cf_srv_sync.py`: sync daemon
-- `install.sh`: one-command interactive installer (Git clone + setup + start)
+- `amp_cf_srv_sync.py`: main sync service
+- `install.sh`: interactive installer/uninstaller
 - `.env.example`: configuration template
-- `systemd/amp-cf-srv-sync.service`: systemd unit example
+- `systemd/amp-cf-srv-sync.service`: systemd example unit
 
-## 2) One-command interactive install (from GitHub)
+## Quick Install (Debian/LXC)
 
-Run this in your Debian LXC:
+Run:
 
 ```bash
-REPO_URL=https://github.com/<your-user>/<your-repo>.git bash <(curl -fsSL https://raw.githubusercontent.com/<your-user>/<your-repo>/main/install.sh)
+bash <(curl -fsSL "https://raw.githubusercontent.com/ChaoticTiramisu/webhook-amp-clouflare/main/install.sh?$(date +%s)")
 ```
 
-The wizard will:
-- Ask for AMP settings
-- Ask for Cloudflare API token and zone ID
+The installer will:
+
+- Clone/update the repo
+- Create `.venv`
+- Install dependencies
+- Prompt for AMP and Cloudflare settings
 - Write `.env`
-- Install Python dependencies
-- Start via systemd (or foreground mode)
+- Optionally install/start systemd service
 
-If this repo is private, use `git clone` manually first and run:
+## Required Cloudflare Permissions
 
-```bash
-chmod +x install.sh
-./install.sh
-```
+Create a token with:
 
-## 3) Cloudflare token permissions
+- `Zone:DNS:Edit`
+- `Zone:Zone:Read`
 
-Create an API token with at least:
-- Zone:DNS:Edit
-- Zone:Zone:Read
-- Scope: only your `cobyas.xyz` zone
+Scope it to your target zone.
 
-## 4) Install in Debian LXC (manual)
+## Configuration
 
-```bash
-sudo mkdir -p /opt/amp-cf-srv-sync
-sudo cp amp_cf_srv_sync.py requirements.txt .env.example /opt/amp-cf-srv-sync/
-cd /opt/amp-cf-srv-sync
-python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-nano .env
-```
+Required values in `.env`:
 
-Set real values in `.env`:
-- `AMP_BASE_URL`: your AMP ADS URL (example `http://127.0.0.1:8080`)
-- `AMP_USERNAME` / `AMP_PASSWORD`: AMP web credentials for AMPAPI_Python (`cc-ampapi`)
-- `CLOUDFLARE_API_TOKEN`: Cloudflare API token
-- `CLOUDFLARE_ZONE_ID`: zone id for `cobyas.xyz`
-- `DEFAULT_TARGET`: target hostname/IP if AMP does not expose one
-- `DNS_TTL`: DNS record TTL
-- `DNS_PROXIED`: usually `false` for game traffic
-- `WEBHOOK_PORT` and `WEBHOOK_PATH`: where AMP will send webhooks
-- `WEBHOOK_TOKEN`: optional shared secret to protect webhook endpoint
+- `AMP_BASE_URL`
+- `AMP_USERNAME`
+- `AMP_PASSWORD`
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ZONE_ID`
 
-## 5) Configure AMP webhook
+Common optional values:
 
-In AMP, create a webhook that sends `POST` requests to:
+- `PERIODIC_SYNC_SECONDS` (default `10`, set `0` to disable periodic loop)
+- `ALLOWED_DOMAIN` (default `cobyas.xyz`)
+- `DNS_TTL` (default `60`)
+- `DNS_PROXIED` (default `false`)
+- `DEFAULT_TARGET` (used when AMP does not provide a target)
+- `IGNORE_INSTANCE_NAMES` (comma-separated names to skip)
 
-```text
-http://<your-lxc-ip>:8787/amp-webhook
-```
-
-If you set `WEBHOOK_TOKEN`, send it in one of these headers:
-- `X-Webhook-Token: <token>`
-- `Authorization: Bearer <token>`
-
-Recommended AMP events:
-- Instance created
-- Instance renamed/updated
-- Instance deleted
-
-Note: exact AMP event names may vary by version/module. This service performs a full reconcile on each webhook, so any event tied to instance changes is sufficient.
-
-## 6) Run manually first
+## Manual Run
 
 ```bash
 cd /opt/amp-cf-srv-sync
 ./.venv/bin/python amp_cf_srv_sync.py
 ```
 
-Watch logs for:
-- Received webhook event
-- Created/Updated/Deleted DNS records
+## systemd
 
-Stop with `Ctrl+C` after validation.
-
-## 7) Install as systemd service
+If installed as a service:
 
 ```bash
-sudo cp systemd/amp-cf-srv-sync.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now amp-cf-srv-sync
-sudo systemctl status amp-cf-srv-sync
-```
-
-Check logs:
-
-```bash
+systemctl status amp-cf-srv-sync
+systemctl is-active amp-cf-srv-sync
 journalctl -u amp-cf-srv-sync -f
 ```
 
-## Notes
+## Uninstall
 
-- The script is webhook-driven and can also run periodic fallback sync via `PERIODIC_SYNC_SECONDS`.
-- AMP instance discovery uses AMPAPI_Python (`cc-ampapi`).
-- It only edits records that have comments beginning with `amp-sync:`.
-- It creates `A`/`AAAA` for IP targets and `CNAME` for hostname targets.
+Run installer and choose uninstall:
+
+```bash
+bash install.sh
+```
+
+Then choose `Install (Y) or Uninstall (N)?` -> `N`.

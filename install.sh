@@ -35,59 +35,6 @@ prompt_required() {
   done
 }
 
-prompt_secret_required() {
-  local prompt="$1"
-  local value
-  while true; do
-    value=""
-    printf "%s: " "$prompt"
-    while IFS= read -r -s -n 1 char; do
-      if [[ "$char" == "" ]]; then
-        break
-      fi
-      if [[ "$char" == $'\177' || "$char" == $'\b' ]]; then
-        if [[ -n "$value" ]]; then
-          value="${value%?}"
-          printf '\b \b'
-        fi
-      else
-        value+="$char"
-        printf '*'
-      fi
-    done
-    echo
-    if [[ -n "$value" ]]; then
-      echo "$value"
-      return
-    fi
-    echo "Value is required."
-  done
-}
-
-prompt_secret_optional() {
-  local prompt="$1"
-  local value=""
-  local char
-
-  printf "%s: " "$prompt"
-  while IFS= read -r -s -n 1 char; do
-    if [[ "$char" == "" ]]; then
-      break
-    fi
-    if [[ "$char" == $'\177' || "$char" == $'\b' ]]; then
-      if [[ -n "$value" ]]; then
-        value="${value%?}"
-        printf '\b \b'
-      fi
-    else
-      value+="$char"
-      printf '*'
-    fi
-  done
-  echo
-  echo "$value"
-}
-
 prompt_yes_no() {
   local prompt="$1"
   local default="$2"
@@ -227,19 +174,7 @@ main() {
   amp_password="$(prompt_required "AMP password")"
 
   local periodic_sync_seconds
-  periodic_sync_seconds="$(prompt_default "Periodic fallback sync seconds (0 disables)" "300")"
-
-  local webhook_host
-  webhook_host="$(prompt_default "Webhook listen host" "0.0.0.0")"
-
-  local webhook_port
-  webhook_port="$(prompt_default "Webhook listen port" "8787")"
-
-  local webhook_path
-  webhook_path="$(prompt_default "Webhook path" "/amp-webhook")"
-
-  local webhook_token
-  webhook_token="$(prompt_default "Webhook token (optional, press enter to skip)" "")"
+  periodic_sync_seconds="$(prompt_default "Periodic sync seconds (0 disables)" "10")"
 
   local cloudflare_api_token
   cloudflare_api_token="$(prompt_required "Cloudflare API token")"
@@ -267,10 +202,6 @@ AMP_BASE_URL=$amp_base_url
 AMP_USERNAME=$amp_username
 AMP_PASSWORD=$amp_password
 PERIODIC_SYNC_SECONDS=$periodic_sync_seconds
-WEBHOOK_HOST=$webhook_host
-WEBHOOK_PORT=$webhook_port
-WEBHOOK_PATH=$webhook_path
-WEBHOOK_TOKEN=$webhook_token
 CLOUDFLARE_API_TOKEN=$cloudflare_api_token
 CLOUDFLARE_ZONE_ID=$cloudflare_zone_id
 ALLOWED_DOMAIN=$allowed_domain
@@ -315,18 +246,8 @@ EOF
     echo "View logs with: journalctl -u amp-cf-srv-sync -f"
   else
     echo
-    echo "AMP webhook target URL: http://<LXC-IP>:$webhook_port$webhook_path"
-    if [[ -n "$webhook_token" ]]; then
-      echo "Send header: X-Webhook-Token: <your-token>"
-    fi
     echo "Starting service in foreground..."
     exec ./.venv/bin/python amp_cf_srv_sync.py
-  fi
-
-  echo
-  echo "AMP webhook target URL: http://<LXC-IP>:$webhook_port$webhook_path"
-  if [[ -n "$webhook_token" ]]; then
-    echo "Send header: X-Webhook-Token: <your-token>"
   fi
 }
 

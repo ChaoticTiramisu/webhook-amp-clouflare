@@ -479,18 +479,8 @@ def parse_config() -> Config:
         dns_proxied=AmpCloudflareSync.parse_bool(os.getenv("DNS_PROXIED", "false"), default=False),
         default_target=os.getenv("DEFAULT_TARGET", "").strip(),
         ignored_names=ignored,
-        webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
-        webhook_port=int(os.getenv("WEBHOOK_PORT", "8787")),
-        webhook_path=("/" + os.getenv("WEBHOOK_PATH", "amp-webhook").lstrip("/")),
-        webhook_token=os.getenv("WEBHOOK_TOKEN", "").strip(),
     )
 
-
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
 
 def main() -> None:
     logging.basicConfig(
