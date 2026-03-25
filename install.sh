@@ -92,13 +92,6 @@ main() {
 
   local repo_url="$DEFAULT_REPO_URL"
 
-  if [[ "$repo_url" == "$PLACEHOLDER_REPO_URL" ]]; then
-    echo "Error: GitHub repository URL is still the placeholder."
-    echo "Set your real repo URL with:"
-    echo "REPO_URL=https://github.com/<user>/<repo>.git bash install.sh"
-    exit 1
-  fi
-
   if [[ -d "$install_dir/.git" ]]; then
     echo "Repository exists, pulling latest changes..."
     git -C "$install_dir" pull --ff-only
