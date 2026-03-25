@@ -21,6 +21,13 @@ try:
 except Exception:
     HAS_CC_AMPAPI = False
 
+try:
+    import miniupnpc
+
+    HAS_MINIUPNPC = True
+except Exception:
+    HAS_MINIUPNPC = False
+
 
 def load_env_file(path: str) -> None:
     if not os.path.exists(path):
@@ -55,6 +62,11 @@ class Config:
     ignored_names: List[str]
     public_ip_source_record: str
     prefer_public_ip_source: bool
+    upnp_enabled: bool
+    upnp_protocols: List[str]
+    upnp_internal_client: str
+    upnp_description_prefix: str
+    upnp_lease_seconds: int
 
 
 class AmpCloudflareSync:
@@ -63,6 +75,9 @@ class AmpCloudflareSync:
         self.http = requests.Session()
         self.http.headers.update({"User-Agent": "amp-cf-srv-sync/1.0"})
         self.sync_lock = threading.Lock()
+        self.amp_loop = asyncio.new_event_loop()
+        self.amp_controller: Any = None
+        self.upnp: Any = None
 
     def run_sync(self, reason: str) -> None:
         with self.sync_lock:
@@ -74,6 +89,7 @@ class AmpCloudflareSync:
         desired = self.build_desired_records(instances)
         existing_managed = self.list_existing_managed_dns_records()
         self.reconcile(desired, existing_managed)
+        self.reconcile_upnp(instances)
 
 
 
@@ -92,62 +108,87 @@ class AmpCloudflareSync:
                 "AMP_USERNAME/AMP_PASSWORD are missing"
             )
 
+        try:
+            instances = self.amp_loop.run_until_complete(self._fetch_amp_instances_async())
+        except Exception:
+            # If session/auth state got stale, recreate the controller once and retry.
+            self.amp_loop.run_until_complete(self._close_amp_controller_async())
+            self.amp_controller = None
+            instances = self.amp_loop.run_until_complete(self._fetch_amp_instances_async())
+
+        logging.info("Fetched %d AMP instances via cc-ampapi", len(instances))
+        return instances
+
+    async def _ensure_amp_controller_async(self) -> Any:
+        if self.amp_controller is not None:
+            return self.amp_controller
+
         params = APIParams(
             url=self.config.amp_base_url,
             user=self.config.amp_username,
             password=self.config.amp_password,
         )
         Bridge(api_params=params)
-        controller = AMPControllerInstance()
-        controller.format_data = False
+        self.amp_controller = AMPControllerInstance()
+        self.amp_controller.format_data = False
+        return self.amp_controller
 
-        async def _load(ctrl: AMPControllerInstance) -> List[Dict[str, Any]]:
-            rows: List[Dict[str, Any]] = []
+    async def _fetch_amp_instances_async(self) -> List[Dict[str, Any]]:
+        ctrl = await self._ensure_amp_controller_async()
+        rows: List[Dict[str, Any]] = []
 
-            try:
-                # Some cc-ampapi versions return instances directly, others expose attrs.
-                result = await ctrl.get_instances(include_self=False, format_data=False)
-                rows.extend(self._normalize_cc_ampapi_rows(result))
+        # Some cc-ampapi versions return instances directly, others expose attrs.
+        result = await ctrl.get_instances(include_self=False, format_data=False)
+        rows.extend(self._normalize_cc_ampapi_rows(result))
 
-                for attr in ("instances", "available_instances", "AvailableInstances"):
-                    value = getattr(ctrl, attr, None)
-                    extracted = self._normalize_cc_ampapi_rows(value)
-                    if extracted:
-                        rows.extend(extracted)
+        for attr in ("instances", "available_instances", "AvailableInstances"):
+            value = getattr(ctrl, attr, None)
+            extracted = self._normalize_cc_ampapi_rows(value)
+            if extracted:
+                rows.extend(extracted)
 
-                # Fallback: in some AMP setups only include_self=True returns usable data.
-                if not rows:
-                    result_self = await ctrl.get_instances(include_self=True, format_data=False)
-                    rows.extend(self._normalize_cc_ampapi_rows(result_self))
-                    for attr in ("instances", "available_instances", "AvailableInstances"):
-                        value = getattr(ctrl, attr, None)
-                        extracted = self._normalize_cc_ampapi_rows(value)
-                        if extracted:
-                            rows.extend(extracted)
-            finally:
-                close_coro = getattr(ctrl, "__adel__", None)
-                if callable(close_coro):
-                    await close_coro()
-                else:
-                    session = getattr(ctrl, "session", None)
-                    if session is not None and not session.closed:
-                        await session.close()
+        # Fallback: in some AMP setups only include_self=True returns usable data.
+        if not rows:
+            result_self = await ctrl.get_instances(include_self=True, format_data=False)
+            rows.extend(self._normalize_cc_ampapi_rows(result_self))
+            for attr in ("instances", "available_instances", "AvailableInstances"):
+                value = getattr(ctrl, attr, None)
+                extracted = self._normalize_cc_ampapi_rows(value)
+                if extracted:
+                    rows.extend(extracted)
 
-            dedup: Dict[str, Dict[str, Any]] = {}
-            for row in rows:
-                key = (
-                    str(row.get("InstanceID") or row.get("instance_id") or "")
-                    + "|"
-                    + str(row.get("FriendlyName") or row.get("friendly_name") or row.get("InstanceName") or row.get("instance_name") or "")
-                )
-                dedup[key] = row
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                str(row.get("InstanceID") or row.get("instance_id") or "")
+                + "|"
+                + str(row.get("FriendlyName") or row.get("friendly_name") or row.get("InstanceName") or row.get("instance_name") or "")
+            )
+            dedup[key] = row
 
-            return list(dedup.values())
+        return list(dedup.values())
 
-        instances = asyncio.run(_load(controller))
-        controller.session = None
-        logging.info("Fetched %d AMP instances via cc-ampapi", len(instances))
-        return instances
+    async def _close_amp_controller_async(self) -> None:
+        if self.amp_controller is None:
+            return
+
+        ctrl = self.amp_controller
+        self.amp_controller = None
+        close_coro = getattr(ctrl, "__adel__", None)
+        if callable(close_coro):
+            await close_coro()
+        else:
+            session = getattr(ctrl, "session", None)
+            if session is not None and not session.closed:
+                await session.close()
+
+    def close(self) -> None:
+        try:
+            if not self.amp_loop.is_closed():
+                self.amp_loop.run_until_complete(self._close_amp_controller_async())
+                self.amp_loop.close()
+        finally:
+            self.http.close()
 
     @staticmethod
     def _normalize_cc_ampapi_rows(value: Any) -> List[Dict[str, Any]]:
@@ -331,6 +372,263 @@ class AmpCloudflareSync:
                 return content
 
         return None
+
+    def reconcile_upnp(self, instances: List[Dict[str, Any]]) -> None:
+        if not self.config.upnp_enabled:
+            return
+
+        if not HAS_MINIUPNPC:
+            logging.warning("UPNP_ENABLED is true but miniupnpc is not installed")
+            return
+
+        client = self.get_upnp_client()
+        if client is None:
+            return
+
+        desired = self.build_desired_upnp_mappings(instances, client)
+        existing = self.list_existing_managed_upnp_mappings(client)
+
+        desired_keys = set(desired.keys())
+        existing_keys = set(existing.keys())
+
+        for key, want in desired.items():
+            have = existing.get(key)
+            if have and self.upnp_mapping_matches(have, want):
+                continue
+
+            if have:
+                self.delete_upnp_mapping(client, have["external_port"], have["protocol"])
+
+            self.create_upnp_mapping(client, want)
+
+        for stale_key in (existing_keys - desired_keys):
+            stale = existing[stale_key]
+            self.delete_upnp_mapping(client, stale["external_port"], stale["protocol"])
+
+    def get_upnp_client(self) -> Optional[Any]:
+        if self.upnp is not None:
+            return self.upnp
+
+        try:
+            client = miniupnpc.UPnP()
+            client.discoverdelay = 200
+            discovered = client.discover()
+            if discovered <= 0:
+                logging.warning("No UPnP gateway discovered")
+                return None
+
+            client.selectigd()
+            self.upnp = client
+            return self.upnp
+        except Exception as exc:
+            logging.warning("UPnP setup failed: %s", exc)
+            return None
+
+    def build_desired_upnp_mappings(self, instances: List[Dict[str, Any]], client: Any) -> Dict[str, Dict[str, Any]]:
+        desired: Dict[str, Dict[str, Any]] = {}
+        domain = self.config.allowed_domain.lower().strip(".")
+        internal_client = self.config.upnp_internal_client.strip() or getattr(client, "lanaddr", "")
+
+        if not internal_client:
+            logging.warning("UPnP internal client could not be determined")
+            return desired
+
+        for instance in instances:
+            raw_name = self.pick_first_str(
+                instance,
+                [
+                    "FriendlyName",
+                    "friendly_name",
+                    "DisplayName",
+                    "display_name",
+                    "InstanceName",
+                    "instance_name",
+                    "Name",
+                    "name",
+                    "Title",
+                    "title",
+                ],
+            )
+            if not raw_name:
+                continue
+
+            instance_name = raw_name.strip().lower()
+            if instance_name in self.config.ignored_names:
+                continue
+
+            instance_id = self.pick_first_str(
+                instance,
+                [
+                    "InstanceID",
+                    "instance_id",
+                    "instanceId",
+                    "Id",
+                    "id",
+                    "ID",
+                    "UUID",
+                    "Guid",
+                    "GUID",
+                ],
+            ) or instance_name
+
+            subdomain = self.extract_subdomain(instance_name, domain)
+            if not subdomain:
+                continue
+
+            ports = self.extract_instance_ports(instance)
+            for port in ports:
+                for protocol in self.config.upnp_protocols:
+                    key = f"{protocol}:{port}"
+                    desired[key] = {
+                        "external_port": port,
+                        "internal_port": port,
+                        "internal_client": internal_client,
+                        "protocol": protocol,
+                        "description": f"{self.config.upnp_description_prefix}{instance_id}",
+                        "instance_name": raw_name,
+                    }
+
+        return desired
+
+    @staticmethod
+    def extract_instance_ports(instance: Dict[str, Any]) -> List[int]:
+        ports: set[int] = set()
+
+        endpoints = instance.get("application_endpoints") or instance.get("ApplicationEndpoints") or []
+        if isinstance(endpoints, list):
+            for endpoint_obj in endpoints:
+                if not isinstance(endpoint_obj, dict):
+                    continue
+
+                display_name = str(
+                    endpoint_obj.get("display_name")
+                    or endpoint_obj.get("DisplayName")
+                    or ""
+                ).lower()
+                if any(token in display_name for token in ("sftp", "ftp", "http", "web", "panel", "rcon")):
+                    continue
+
+                endpoint = str(endpoint_obj.get("endpoint") or endpoint_obj.get("Endpoint") or "")
+                match = re.search(r":(\d+)$", endpoint.strip())
+                if match:
+                    port = int(match.group(1))
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+
+        deployment_args = instance.get("deployment_args") or instance.get("DeploymentArgs") or {}
+        if isinstance(deployment_args, dict):
+            for key, value in deployment_args.items():
+                key_str = str(key).lower()
+                if "port" not in key_str or "sftp" in key_str:
+                    continue
+                value_str = str(value).strip()
+                if value_str.isdigit():
+                    port = int(value_str)
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+
+        if not ports:
+            direct_port = instance.get("port") or instance.get("Port")
+            if isinstance(direct_port, int) and 1 <= direct_port <= 65535:
+                ports.add(direct_port)
+            elif isinstance(direct_port, str) and direct_port.isdigit():
+                port = int(direct_port)
+                if 1 <= port <= 65535:
+                    ports.add(port)
+
+        return sorted(ports)
+
+    def list_existing_managed_upnp_mappings(self, client: Any) -> Dict[str, Dict[str, Any]]:
+        existing: Dict[str, Dict[str, Any]] = {}
+        index = 0
+
+        while True:
+            entry = client.getgenericportmapping(index)
+            if not entry:
+                break
+
+            index += 1
+            try:
+                external_port = int(entry[0])
+                protocol = str(entry[1]).lower()
+                internal_client, internal_port = entry[2]
+                description = str(entry[3] or "")
+            except Exception:
+                continue
+
+            if not description.startswith(self.config.upnp_description_prefix):
+                continue
+
+            key = f"{protocol}:{external_port}"
+            existing[key] = {
+                "external_port": external_port,
+                "internal_port": int(internal_port),
+                "internal_client": str(internal_client),
+                "protocol": protocol,
+                "description": description,
+            }
+
+        return existing
+
+    @staticmethod
+    def upnp_mapping_matches(existing: Dict[str, Any], desired: Dict[str, Any]) -> bool:
+        return (
+            int(existing["external_port"]) == int(desired["external_port"])
+            and int(existing["internal_port"]) == int(desired["internal_port"])
+            and str(existing["internal_client"]) == str(desired["internal_client"])
+            and str(existing["protocol"]).lower() == str(desired["protocol"]).lower()
+            and str(existing["description"]) == str(desired["description"])
+        )
+
+    def create_upnp_mapping(self, client: Any, desired: Dict[str, Any]) -> None:
+        try:
+            try:
+                ok = client.addportmapping(
+                    desired["external_port"],
+                    desired["protocol"].upper(),
+                    desired["internal_client"],
+                    desired["internal_port"],
+                    desired["description"],
+                    "",
+                    desired["upnp_lease_seconds"] if "upnp_lease_seconds" in desired else self.config.upnp_lease_seconds,
+                )
+            except TypeError:
+                ok = client.addportmapping(
+                    desired["external_port"],
+                    desired["protocol"].upper(),
+                    desired["internal_client"],
+                    desired["internal_port"],
+                    desired["description"],
+                    "",
+                )
+
+            if ok is False:
+                raise RuntimeError("gateway rejected addportmapping")
+
+            logging.info(
+                "Created UPnP mapping %s/%s -> %s:%s for instance '%s'",
+                desired["external_port"],
+                desired["protocol"].upper(),
+                desired["internal_client"],
+                desired["internal_port"],
+                desired["instance_name"],
+            )
+        except Exception as exc:
+            logging.warning(
+                "Failed to create UPnP mapping %s/%s: %s",
+                desired["external_port"],
+                desired["protocol"].upper(),
+                exc,
+            )
+
+    def delete_upnp_mapping(self, client: Any, external_port: int, protocol: str) -> None:
+        try:
+            ok = client.deleteportmapping(external_port, protocol.upper())
+            if ok is False:
+                raise RuntimeError("gateway rejected deleteportmapping")
+            logging.info("Deleted UPnP mapping %s/%s", external_port, protocol.upper())
+        except Exception as exc:
+            logging.warning("Failed to delete UPnP mapping %s/%s: %s", external_port, protocol.upper(), exc)
 
     @staticmethod
     def is_private_or_loopback_target(target: Optional[str]) -> bool:
@@ -612,6 +910,15 @@ def parse_config() -> Config:
         if x.strip()
     ]
 
+    upnp_protocols = [
+        x.strip().lower()
+        for x in os.getenv("UPNP_PROTOCOLS", "tcp").split(",")
+        if x.strip()
+    ]
+    upnp_protocols = [p for p in upnp_protocols if p in ("tcp", "udp")]
+    if not upnp_protocols:
+        upnp_protocols = ["tcp"]
+
     amp_username = os.getenv("AMP_USERNAME", "").strip()
     amp_password = os.getenv("AMP_PASSWORD", "").strip()
 
@@ -634,6 +941,11 @@ def parse_config() -> Config:
         prefer_public_ip_source=AmpCloudflareSync.parse_bool(
             os.getenv("PREFER_PUBLIC_IP_SOURCE", "true"), default=True
         ),
+        upnp_enabled=AmpCloudflareSync.parse_bool(os.getenv("UPNP_ENABLED", "false"), default=False),
+        upnp_protocols=upnp_protocols,
+        upnp_internal_client=os.getenv("UPNP_INTERNAL_CLIENT", "").strip(),
+        upnp_description_prefix=os.getenv("UPNP_DESCRIPTION_PREFIX", "amp-sync-upnp:").strip() or "amp-sync-upnp:",
+        upnp_lease_seconds=int(os.getenv("UPNP_LEASE_SECONDS", "0")),
     )
 
 
@@ -646,19 +958,14 @@ def main() -> None:
     config = parse_config()
     sync = AmpCloudflareSync(config)
 
-    # Ensure DNS starts in a correct state on startup.
-    sync.run_sync("startup")
-
-    # Start periodic sync loop.
-    periodic_thread = threading.Thread(target=sync.run_periodic_loop, daemon=True)
-    periodic_thread.start()
-
-    # Keep main thread alive.
     try:
-        while True:
-            time.sleep(1)
+        # Ensure DNS starts in a correct state on startup.
+        sync.run_sync("startup")
+        sync.run_periodic_loop()
     except KeyboardInterrupt:
         logging.info("Shutting down...")
+    finally:
+        sync.close()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ It runs as a periodic sync service (default every 10 seconds) and does not requi
 
 If you already run a Cloudflare DDNS updater in another LXC, this service can read that DDNS record and use it as the target for game DNS records.
 
+Optional: it can also create and clean UPnP port forwards on your Debian host's gateway for instances under your allowed domain.
+
 ## Behavior
 
 - Only instances with names ending in the configured domain are managed.
@@ -69,7 +71,19 @@ Common optional values:
 - `DEFAULT_TARGET` (used when AMP does not provide a target)
 - `PUBLIC_IP_SOURCE_RECORD` (Cloudflare record to read public target from, for example `home.cobyas.xyz`)
 - `PREFER_PUBLIC_IP_SOURCE` (default `true`; if `false`, only used when AMP target is private/loopback/missing)
+- `UPNP_ENABLED` (default `false`; enable auto port forwarding)
+- `UPNP_PROTOCOLS` (`tcp`, `udp`, or `tcp,udp`)
+- `UPNP_INTERNAL_CLIENT` (optional fixed LAN IP; otherwise gateway LAN address auto-detected)
+- `UPNP_DESCRIPTION_PREFIX` (default `amp-sync-upnp:`)
+- `UPNP_LEASE_SECONDS` (default `0`, permanent if supported)
 - `IGNORE_INSTANCE_NAMES` (comma-separated names to skip)
+
+## UPnP Notes
+
+- UPnP is only applied to instances that match `*.ALLOWED_DOMAIN`.
+- If an instance is renamed away from that domain or removed, managed UPnP mappings are deleted.
+- Mappings are tracked by description prefix so unmanaged router mappings are not touched.
+- Requires router UPnP enabled and the Python package `miniupnpc`.
 
 ## Manual Run
 
