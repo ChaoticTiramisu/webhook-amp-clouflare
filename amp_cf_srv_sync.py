@@ -204,6 +204,7 @@ class AmpCloudflareSync:
         )
 
         endpoint_rows: List[Dict[str, Any]] = []
+        network_rows: List[Dict[str, Any]] = []
 
         if instance_id:
             try:
@@ -215,18 +216,21 @@ class AmpCloudflareSync:
         if instance_name:
             try:
                 network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=False)
-                endpoint_rows.extend(self._normalize_endpoint_rows(network_data))
+                network_rows.extend(self._normalize_endpoint_rows(network_data))
             except Exception as exc:
                 logging.debug("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
 
-        if not endpoint_rows:
-            return
+        if endpoint_rows:
+            existing = row.get("application_endpoints") or row.get("ApplicationEndpoints") or []
+            if not isinstance(existing, list):
+                existing = []
+            row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
 
-        existing = row.get("application_endpoints") or row.get("ApplicationEndpoints") or []
-        if not isinstance(existing, list):
-            existing = []
-
-        row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
+        if network_rows:
+            existing_network = row.get("instance_network_info") or row.get("InstanceNetworkInfo") or []
+            if not isinstance(existing_network, list):
+                existing_network = []
+            row["instance_network_info"] = self.merge_endpoint_rows(existing_network, network_rows)
 
     @staticmethod
     def merge_endpoint_rows(existing: List[Any], new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -308,6 +312,8 @@ class AmpCloudflareSync:
         endpoint_keys = (
             "application_endpoints",
             "ApplicationEndpoints",
+            "instance_network_info",
+            "InstanceNetworkInfo",
             "endpoints",
             "Endpoints",
             "network_endpoints",
@@ -656,6 +662,27 @@ class AmpCloudflareSync:
     def extract_instance_ports(instance: Dict[str, Any]) -> List[int]:
         ports: set[int] = set()
 
+        # Primary source: ADSModule.get_instance_network_info (PortInfo rows).
+        network_info = instance.get("instance_network_info") or instance.get("InstanceNetworkInfo") or []
+        if isinstance(network_info, list):
+            for row in network_info:
+                if not isinstance(row, dict):
+                    continue
+
+                base_port = AmpCloudflareSync.pick_first_int(row, ["port_number", "PortNumber", "port", "Port"])
+                port_range = AmpCloudflareSync.pick_first_int(row, ["range", "Range"]) or 1
+
+                if base_port and 1 <= base_port <= 65535:
+                    width = max(1, min(port_range, 65535 - base_port + 1))
+                    for port in range(base_port, base_port + width):
+                        ports.add(port)
+
+                # Parse any endpoint-style values that may be present.
+                for key, value in row.items():
+                    key_s = str(key).lower()
+                    if "port" in key_s or "endpoint" in key_s:
+                        ports.update(AmpCloudflareSync.extract_ports_from_value(value))
+
         # Only use ports AMP reports as application endpoints (Network tab).
         endpoints: Any = []
         for key in (
@@ -701,18 +728,6 @@ class AmpCloudflareSync:
                     key_s = str(key).lower()
                     if "port" in key_s or "endpoint" in key_s:
                         ports.update(AmpCloudflareSync.extract_ports_from_value(value))
-
-        # Network-tab configured ports can exist in deployment args even if endpoint
-        # status is not currently listening.
-        for args_key in ("deployment_args", "DeploymentArgs"):
-            deployment_args = instance.get(args_key)
-            if not isinstance(deployment_args, dict):
-                continue
-            for key, value in deployment_args.items():
-                key_s = str(key).lower()
-                if "port" not in key_s and "endpoint" not in key_s:
-                    continue
-                ports.update(AmpCloudflareSync.extract_ports_from_value(value))
 
         return sorted(ports)
 
