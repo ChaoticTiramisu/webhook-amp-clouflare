@@ -574,6 +574,24 @@ class AmpCloudflareSync:
                     port_val = endpoint_obj.get(port_key)
                     ports.update(AmpCloudflareSync.extract_ports_from_value(port_val))
 
+                # Some AMP modules expose configured ports under variant key names.
+                for key, value in endpoint_obj.items():
+                    key_s = str(key).lower()
+                    if "port" in key_s or "endpoint" in key_s:
+                        ports.update(AmpCloudflareSync.extract_ports_from_value(value))
+
+        # Network-tab configured ports can exist in deployment args even if endpoint
+        # status is not currently listening.
+        for args_key in ("deployment_args", "DeploymentArgs"):
+            deployment_args = instance.get(args_key)
+            if not isinstance(deployment_args, dict):
+                continue
+            for key, value in deployment_args.items():
+                key_s = str(key).lower()
+                if "port" not in key_s and "endpoint" not in key_s:
+                    continue
+                ports.update(AmpCloudflareSync.extract_ports_from_value(value))
+
         return sorted(ports)
 
     @staticmethod
