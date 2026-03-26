@@ -727,6 +727,22 @@ class AmpCloudflareSync:
         return None
 
     @staticmethod
+    def is_sftp_management_row(value: Any) -> bool:
+        if isinstance(value, str):
+            return "sftp" in value.lower()
+        if isinstance(value, dict):
+            for nested in value.values():
+                if AmpCloudflareSync.is_sftp_management_row(nested):
+                    return True
+            return False
+        if isinstance(value, (list, tuple, set)):
+            for nested in value:
+                if AmpCloudflareSync.is_sftp_management_row(nested):
+                    return True
+            return False
+        return False
+
+    @staticmethod
     def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
         mappings: set[tuple[str, int]] = set()
 
@@ -736,31 +752,25 @@ class AmpCloudflareSync:
             for row in network_info:
                 if not isinstance(row, dict):
                     continue
-
-                protocol = None
-                for key in ("protocol", "Protocol", "proto", "Proto"):
-                    if key in row:
-                        protocol = AmpCloudflareSync.normalize_protocol(row[key])
-                        if protocol:
-                            break
+                if AmpCloudflareSync.is_sftp_management_row(row):
+                    continue
 
                 base_port = AmpCloudflareSync.pick_first_int(row, ["port_number", "PortNumber", "port", "Port"])
                 port_range = AmpCloudflareSync.pick_first_int(row, ["range", "Range"]) or 1
 
-                if protocol and base_port and 1 <= base_port <= 65535:
+                if base_port and 1 <= base_port <= 65535:
                     width = max(1, min(port_range, 65535 - base_port + 1))
                     for port in range(base_port, base_port + width):
-                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
-                            mappings.add((proto, port))
+                        mappings.add(("tcp", port))
+                        mappings.add(("udp", port))
 
-                if protocol:
-                    # Parse endpoint-style values that may encode ports in strings.
-                    for key, value in row.items():
-                        key_s = str(key).lower()
-                        if "port" in key_s or "endpoint" in key_s:
-                            for port in AmpCloudflareSync.extract_ports_from_value(value):
-                                for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
-                                    mappings.add((proto, port))
+                # Parse endpoint-style values that may encode ports in strings.
+                for key, value in row.items():
+                    key_s = str(key).lower()
+                    if "port" in key_s or "endpoint" in key_s:
+                        for port in AmpCloudflareSync.extract_ports_from_value(value):
+                            mappings.add(("tcp", port))
+                            mappings.add(("udp", port))
 
         # Secondary source: application endpoint rows from AMP API.
         endpoints: Any = []
@@ -793,41 +803,27 @@ class AmpCloudflareSync:
             for endpoint_obj in endpoints:
                 if not isinstance(endpoint_obj, dict):
                     continue
-
-                protocol = None
-                for key in ("protocol", "Protocol", "proto", "Proto"):
-                    if key in endpoint_obj:
-                        protocol = AmpCloudflareSync.normalize_protocol(endpoint_obj[key])
-                        if protocol:
-                            break
-                
-                if protocol is None:
-                    for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
-                        protocol = AmpCloudflareSync.extract_protocol_from_text(endpoint_obj.get(endpoint_key))
-                        if protocol:
-                            break
-
-                if protocol is None:
+                if AmpCloudflareSync.is_sftp_management_row(endpoint_obj):
                     continue
 
                 for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
                     endpoint_val = endpoint_obj.get(endpoint_key)
                     for port in AmpCloudflareSync.extract_ports_from_value(endpoint_val):
-                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
-                            mappings.add((proto, port))
+                        mappings.add(("tcp", port))
+                        mappings.add(("udp", port))
 
                 for port_key in ("port", "Port", "external_port", "ExternalPort"):
                     port_val = endpoint_obj.get(port_key)
                     for port in AmpCloudflareSync.extract_ports_from_value(port_val):
-                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
-                            mappings.add((proto, port))
+                        mappings.add(("tcp", port))
+                        mappings.add(("udp", port))
 
                 for key, value in endpoint_obj.items():
                     key_s = str(key).lower()
                     if "port" in key_s or "endpoint" in key_s:
                         for port in AmpCloudflareSync.extract_ports_from_value(value):
-                            for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
-                                mappings.add((proto, port))
+                            mappings.add(("tcp", port))
+                            mappings.add(("udp", port))
 
         return sorted(mappings, key=lambda x: (x[1], x[0]))
 
