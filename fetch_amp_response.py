@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -29,7 +29,15 @@ def raw_post(session: requests.Session, base_url: str, path: str, payload: Dict[
     url = f"{base}{path}"
     body = json.dumps(payload, ensure_ascii=True)
 
-    response = session.post(url, data=body, headers={"Content-Type": "application/json"}, timeout=30)
+    response = session.post(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        timeout=30,
+    )
     raw_text = response.text
     parsed = parse_json_or_none(raw_text)
 
@@ -37,7 +45,10 @@ def raw_post(session: requests.Session, base_url: str, path: str, payload: Dict[
         "request": {
             "url": url,
             "method": "POST",
-            "headers": {"Content-Type": "application/json"},
+            "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
             "json": payload,
             "body": body,
         },
@@ -99,7 +110,7 @@ def fetch_raw(args: argparse.Namespace) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         "meta": {
-            "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "base_url": args.base_url,
             "include_self": args.include_self,
             "instance_filter": args.instance,
