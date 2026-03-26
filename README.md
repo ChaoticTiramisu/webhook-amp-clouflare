@@ -83,6 +83,7 @@ Common optional values:
 - `PREFER_PUBLIC_IP_SOURCE` (default `true`; if `false`, only used when AMP target is private/loopback/missing)
 - `UPNP_ENABLED` (default `false`; enable auto port forwarding)
 - `UPNP_PROTOCOLS` (`tcp`, `udp`, or `tcp,udp`)
+- `UPNP_DEBUG` (default `false`; enables verbose UPnP diagnostics in logs)
 - `UPNP_INTERNAL_CLIENT` (optional fixed LAN IP; otherwise gateway LAN address auto-detected)
 - `UPNP_DESCRIPTION_PREFIX` (default `amp-sync-upnp:`)
 - `UPNP_LEASE_SECONDS` (default `0`, permanent if supported)
@@ -93,6 +94,7 @@ Common optional values:
 - UPnP is only applied to instances that match `*.ALLOWED_DOMAIN`.
 - If an instance is renamed away from that domain or removed, managed UPnP mappings are deleted.
 - Mappings are tracked by description prefix so unmanaged router mappings are not touched.
+- If `UPNP_PROTOCOLS=tcp`, UDP-only game ports will not be mapped.
 - Requires router UPnP enabled and the Python package `miniupnpc`.
 
 ## Manual Run

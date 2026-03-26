@@ -64,6 +64,7 @@ class Config:
     prefer_public_ip_source: bool
     upnp_enabled: bool
     upnp_protocols: List[str]
+    upnp_debug: bool
     upnp_internal_client: str
     upnp_description_prefix: str
     upnp_lease_seconds: int
@@ -551,8 +552,23 @@ class AmpCloudflareSync:
         desired = self.build_desired_upnp_mappings(instances, client)
         existing = self.list_existing_managed_upnp_mappings(client)
 
+        if self.config.upnp_debug:
+            logging.info(
+                "UPnP reconcile summary: desired=%d existing_managed=%d",
+                len(desired),
+                len(existing),
+            )
+
         desired_keys = set(desired.keys())
         existing_keys = set(existing.keys())
+
+        if self.config.upnp_debug:
+            missing = sorted(desired_keys - existing_keys)
+            stale = sorted(existing_keys - desired_keys)
+            if missing:
+                logging.info("UPnP missing mappings: %s", ", ".join(missing))
+            if stale:
+                logging.info("UPnP stale mappings: %s", ", ".join(stale))
 
         for key, want in desired.items():
             have = existing.get(key)
@@ -642,7 +658,17 @@ class AmpCloudflareSync:
             if ports:
                 logging.info("UPnP ports for '%s': %s", raw_name, ",".join(str(p) for p in ports))
             else:
-                logging.info("UPnP ports for '%s': none found in AMP endpoint data", raw_name)
+                logging.info("UPnP ports for '%s': none found in AMP network data", raw_name)
+
+            if self.config.upnp_debug:
+                network_rows = instance.get("instance_network_info") or []
+                endpoint_rows = instance.get("application_endpoints") or []
+                logging.info(
+                    "UPnP source rows for '%s': network_info=%d application_endpoints=%d",
+                    raw_name,
+                    len(network_rows) if isinstance(network_rows, list) else 0,
+                    len(endpoint_rows) if isinstance(endpoint_rows, list) else 0,
+                )
 
             for port in ports:
                 for protocol in self.config.upnp_protocols:
@@ -827,7 +853,15 @@ class AmpCloudflareSync:
         )
 
     def create_upnp_mapping(self, client: Any, desired: Dict[str, Any]) -> None:
+        conflict: Optional[tuple] = None
         try:
+            try:
+                conflict = client.getspecificportmapping(
+                    desired["external_port"], desired["protocol"].upper()
+                )
+            except Exception:
+                conflict = None
+
             try:
                 ok = client.addportmapping(
                     desired["external_port"],
@@ -860,6 +894,26 @@ class AmpCloudflareSync:
                 desired["instance_name"],
             )
         except Exception as exc:
+            if self.config.upnp_debug and conflict:
+                try:
+                    existing_client, existing_port = conflict[1]
+                    existing_desc = conflict[2]
+                    logging.warning(
+                        "UPnP conflict for %s/%s already mapped to %s:%s desc='%s'",
+                        desired["external_port"],
+                        desired["protocol"].upper(),
+                        existing_client,
+                        existing_port,
+                        existing_desc,
+                    )
+                except Exception:
+                    logging.warning(
+                        "UPnP conflict data for %s/%s: %r",
+                        desired["external_port"],
+                        desired["protocol"].upper(),
+                        conflict,
+                    )
+
             logging.warning(
                 "Failed to create UPnP mapping %s/%s: %s",
                 desired["external_port"],
@@ -1189,6 +1243,7 @@ def parse_config() -> Config:
         ),
         upnp_enabled=AmpCloudflareSync.parse_bool(os.getenv("UPNP_ENABLED", "false"), default=False),
         upnp_protocols=upnp_protocols,
+        upnp_debug=AmpCloudflareSync.parse_bool(os.getenv("UPNP_DEBUG", "false"), default=False),
         upnp_internal_client=os.getenv("UPNP_INTERNAL_CLIENT", "").strip(),
         upnp_description_prefix=os.getenv("UPNP_DESCRIPTION_PREFIX", "amp-sync-upnp:").strip() or "amp-sync-upnp:",
         upnp_lease_seconds=int(os.getenv("UPNP_LEASE_SECONDS", "0")),
