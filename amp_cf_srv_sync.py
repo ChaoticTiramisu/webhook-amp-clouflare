@@ -689,13 +689,24 @@ class AmpCloudflareSync:
         return sorted({port for _, port in AmpCloudflareSync.extract_instance_port_protocols(instance)})
 
     @staticmethod
-    def normalize_protocol(value: Optional[str]) -> Optional[str]:
+    def normalize_protocol(value: Any) -> Optional[str]:
+        if isinstance(value, int):
+            if value == 1:
+                return "udp"
+            if value == 2:
+                return "tcp"
+            return None
         if not isinstance(value, str):
             return None
         raw = value.strip().lower()
         if raw in ("tcp", "udp"):
             return raw
         return None
+
+    @staticmethod
+    def expand_protocol_both_needed(protocol: str, port: int) -> List[str]:
+        """All detected game ports need both TCP and UDP for full compatibility."""
+        return ["tcp", "udp"]
 
     @staticmethod
     def extract_protocol_from_text(value: Any) -> Optional[str]:
@@ -719,16 +730,21 @@ class AmpCloudflareSync:
                 if not isinstance(row, dict):
                     continue
 
-                protocol = AmpCloudflareSync.normalize_protocol(
-                    AmpCloudflareSync.pick_first_str(row, ["protocol", "Protocol", "proto", "Proto"])
-                )
+                protocol = None
+                for key in ("protocol", "Protocol", "proto", "Proto"):
+                    if key in row:
+                        protocol = AmpCloudflareSync.normalize_protocol(row[key])
+                        if protocol:
+                            break
+
                 base_port = AmpCloudflareSync.pick_first_int(row, ["port_number", "PortNumber", "port", "Port"])
                 port_range = AmpCloudflareSync.pick_first_int(row, ["range", "Range"]) or 1
 
                 if protocol and base_port and 1 <= base_port <= 65535:
                     width = max(1, min(port_range, 65535 - base_port + 1))
                     for port in range(base_port, base_port + width):
-                        mappings.add((protocol, port))
+                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
+                            mappings.add((proto, port))
 
                 if protocol:
                     # Parse endpoint-style values that may encode ports in strings.
@@ -770,9 +786,13 @@ class AmpCloudflareSync:
                 if not isinstance(endpoint_obj, dict):
                     continue
 
-                protocol = AmpCloudflareSync.normalize_protocol(
-                    AmpCloudflareSync.pick_first_str(endpoint_obj, ["protocol", "Protocol", "proto", "Proto"])
-                )
+                protocol = None
+                for key in ("protocol", "Protocol", "proto", "Proto"):
+                    if key in endpoint_obj:
+                        protocol = AmpCloudflareSync.normalize_protocol(endpoint_obj[key])
+                        if protocol:
+                            break
+                
                 if protocol is None:
                     for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
                         protocol = AmpCloudflareSync.extract_protocol_from_text(endpoint_obj.get(endpoint_key))
@@ -785,18 +805,21 @@ class AmpCloudflareSync:
                 for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
                     endpoint_val = endpoint_obj.get(endpoint_key)
                     for port in AmpCloudflareSync.extract_ports_from_value(endpoint_val):
-                        mappings.add((protocol, port))
+                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
+                            mappings.add((proto, port))
 
                 for port_key in ("port", "Port", "external_port", "ExternalPort"):
                     port_val = endpoint_obj.get(port_key)
                     for port in AmpCloudflareSync.extract_ports_from_value(port_val):
-                        mappings.add((protocol, port))
+                        for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
+                            mappings.add((proto, port))
 
                 for key, value in endpoint_obj.items():
                     key_s = str(key).lower()
                     if "port" in key_s or "endpoint" in key_s:
                         for port in AmpCloudflareSync.extract_ports_from_value(value):
-                            mappings.add((protocol, port))
+                            for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
+                                mappings.add((proto, port))
 
         return sorted(mappings, key=lambda x: (x[1], x[0]))
 
