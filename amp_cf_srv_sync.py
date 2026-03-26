@@ -164,9 +164,44 @@ class AmpCloudflareSync:
                 + "|"
                 + str(row.get("FriendlyName") or row.get("friendly_name") or row.get("InstanceName") or row.get("instance_name") or "")
             )
-            dedup[key] = row
+            current = dedup.get(key)
+            if current is None:
+                dedup[key] = row
+            else:
+                dedup[key] = self.pick_richer_instance_row(current, row)
 
         return list(dedup.values())
+
+    @staticmethod
+    def pick_richer_instance_row(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+        left_ports = AmpCloudflareSync.extract_instance_ports(left)
+        right_ports = AmpCloudflareSync.extract_instance_ports(right)
+
+        if len(right_ports) > len(left_ports):
+            return right
+        if len(left_ports) > len(right_ports):
+            return left
+
+        # Prefer the row that actually carries endpoint structures.
+        endpoint_keys = (
+            "application_endpoints",
+            "ApplicationEndpoints",
+            "endpoints",
+            "Endpoints",
+            "network_endpoints",
+            "NetworkEndpoints",
+        )
+        left_has_endpoints = any(bool(left.get(k)) for k in endpoint_keys)
+        right_has_endpoints = any(bool(right.get(k)) for k in endpoint_keys)
+        if right_has_endpoints and not left_has_endpoints:
+            return right
+        if left_has_endpoints and not right_has_endpoints:
+            return left
+
+        # Final tie-breaker: keep the richer dictionary payload.
+        if len(right.keys()) > len(left.keys()):
+            return right
+        return left
 
     async def _close_amp_controller_async(self) -> None:
         if self.amp_controller is None:
