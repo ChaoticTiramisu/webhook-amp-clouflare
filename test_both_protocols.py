@@ -29,21 +29,26 @@ sync = AmpCloudflareSync(cfg)
 instance = {
     "FriendlyName": "mc.game.cobyas.xyz",
     "InstanceID": "abc",
-    "instance_network_info": [
-        {"port_number": 2224, "protocol": 0, "range": 1, "description": "SFTP"},
-        {"port_number": 25565, "protocol": 2, "range": 1},
+    "ApplicationEndpoints": [
+        {"DisplayName": "Minecraft Server Address", "Endpoint": "0.0.0.0:25565", "Uri": ""},
+        {"DisplayName": "SFTP Server", "Endpoint": "0.0.0.0:2224", "Uri": "sftp://0.0.0.0:2224"},
     ],
+    "DeploymentArgs": {
+        "MinecraftModule.Minecraft.PortNumber": "25565",
+    },
 }
 print("Minecraft extracted:", sync.extract_instance_port_protocols(instance))
 
 instance2 = {
     "FriendlyName": "satisfactory.game.cobyas.xyz",
     "InstanceID": "def",
-    "instance_network_info": [
-        {"port_number": 2225, "protocol": 0, "range": 1, "DisplayName": "SFTP"},
-        {"port_number": 7777, "protocol": 2, "range": 1},
-        {"port_number": 8888, "protocol": 1, "range": 1},
+    "ApplicationEndpoints": [
+        {"DisplayName": "Application Address", "Endpoint": "0.0.0.0:7777", "Uri": "0.0.0.0:7777"},
+        {"DisplayName": "SFTP Server", "Endpoint": "0.0.0.0:2225", "Uri": "sftp://0.0.0.0:2225"},
     ],
+    "DeploymentArgs": {
+        "GenericModule.App.Ports": '[{"Protocol":2,"Port":7777,"Range":1},{"Protocol":1,"Port":8888,"Range":1}]',
+    },
 }
 print("Satisfactory extracted:", sync.extract_instance_port_protocols(instance2))
 
@@ -51,15 +56,17 @@ print("Satisfactory extracted:", sync.extract_instance_port_protocols(instance2)
 rand_game_ports = sorted(random.sample(range(20000, 40000), 3))
 rand_sftp_port = random.choice(range(2200, 2300))
 
+print("Random game input ports:", rand_game_ports, "(sftp:", rand_sftp_port, ")")
+
 instance3 = {
     "FriendlyName": "valheim.game.cobyas.xyz",
     "InstanceID": "ghi",
-    "instance_network_info": [
-        {"port_number": rand_sftp_port, "protocol": 0, "range": 1, "DisplayName": "SFTP"},
-        {"port_number": rand_game_ports[0], "protocol": 2, "range": 1},
-        {"port_number": rand_game_ports[1], "protocol": 1, "range": 1},
-        {"port_number": rand_game_ports[2], "protocol": 2, "range": 1},
+    "ApplicationEndpoints": [
+        {"DisplayName": "SFTP Server", "Endpoint": f"0.0.0.0:{rand_sftp_port}", "Uri": f"sftp://0.0.0.0:{rand_sftp_port}"},
+        {"DisplayName": "Game Port 1", "Endpoint": f"0.0.0.0:{rand_game_ports[0]}", "Uri": ""},
+        {"DisplayName": "Game Port 2", "Endpoint": f"0.0.0.0:{rand_game_ports[1]}", "Uri": ""},
+        {"DisplayName": "Game Port 3", "Endpoint": f"0.0.0.0:{rand_game_ports[2]}", "Uri": ""},
     ],
+    "DeploymentArgs": {},
 }
-print("Random game input ports:", rand_game_ports, "(sftp:", rand_sftp_port, ")")
 print("Valheim extracted:", sync.extract_instance_port_protocols(instance3))

@@ -749,72 +749,53 @@ class AmpCloudflareSync:
     def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
         ports: set[int] = set()
 
-        # Primary source: ADSModule.get_instance_network_info (PortInfo rows).
-        network_info = instance.get("instance_network_info") or instance.get("InstanceNetworkInfo") or []
-        if isinstance(network_info, list):
-            for row in network_info:
-                if not isinstance(row, dict):
-                    continue
-                if AmpCloudflareSync.is_sftp_management_row(row):
-                    continue
-
-                base_port = AmpCloudflareSync.pick_first_int(row, ["port_number", "PortNumber", "port", "Port"])
-                port_range = AmpCloudflareSync.pick_first_int(row, ["range", "Range"]) or 1
-
-                if base_port and 1 <= base_port <= 65535:
-                    width = max(1, min(port_range, 65535 - base_port + 1))
-                    for port in range(base_port, base_port + width):
-                        ports.add(port)
-
-                for key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
-                    endpoint_port = AmpCloudflareSync.api_endpoint_port(row.get(key))
-                    if endpoint_port:
-                        ports.add(endpoint_port)
-
-        # Secondary source: application endpoint rows from AMP API.
-        endpoints: Any = []
-        for key in (
-            "application_endpoints",
-            "ApplicationEndpoints",
-            "endpoints",
-            "Endpoints",
-            "network_endpoints",
-            "NetworkEndpoints",
-        ):
-            value = instance.get(key)
-            if value:
-                endpoints = value
-                break
-
-        if isinstance(endpoints, str):
-            try:
-                parsed = json.loads(endpoints)
-                endpoints = parsed
-            except Exception:
-                endpoints = []
-
-        if isinstance(endpoints, dict):
-            nested = endpoints.get("items") or endpoints.get("Items") or endpoints.get("endpoints") or endpoints.get("Endpoints")
-            if isinstance(nested, list):
-                endpoints = nested
-
-        if isinstance(endpoints, list):
-            for endpoint_obj in endpoints:
+        # Source 1: ApplicationEndpoints array from GetInstances response.
+        app_endpoints = instance.get("ApplicationEndpoints") or []
+        if isinstance(app_endpoints, list):
+            for endpoint_obj in app_endpoints:
                 if not isinstance(endpoint_obj, dict):
                     continue
-                if AmpCloudflareSync.is_sftp_management_row(endpoint_obj):
+
+                # Skip SFTP endpoints.
+                display_name = endpoint_obj.get("DisplayName") or ""
+                if "sftp" in display_name.lower():
                     continue
 
-                for key in ("port", "Port", "external_port", "ExternalPort", "internal_port", "InternalPort"):
-                    port = AmpCloudflareSync.api_port_value(endpoint_obj.get(key))
-                    if port:
-                        ports.add(port)
+                # Extract port from Endpoint field: "0.0.0.0:7777" or "hostname:port".
+                endpoint_str = endpoint_obj.get("Endpoint") or ""
+                if endpoint_str and ":" in endpoint_str:
+                    try:
+                        port_str = endpoint_str.rsplit(":", 1)[1].strip()
+                        if port_str.isdigit():
+                            port = int(port_str)
+                            if 1 <= port <= 65535:
+                                ports.add(port)
+                    except (ValueError, IndexError):
+                        pass
 
-                for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
-                    endpoint_val = endpoint_obj.get(endpoint_key)
-                    endpoint_port = AmpCloudflareSync.api_endpoint_port(endpoint_val)
+                # Extract port from Uri field if it contains scheme (e.g., "tcp://host:port").
+                uri_str = endpoint_obj.get("Uri") or ""
+                if uri_str and "://" in uri_str:
+                    endpoint_port = AmpCloudflareSync.api_endpoint_port(uri_str)
                     if endpoint_port:
                         ports.add(endpoint_port)
+
+        # Source 2: DeploymentArgs["GenericModule.App.Ports"] - JSON string with port definitions.
+        deployment_args = instance.get("DeploymentArgs") or {}
+        if isinstance(deployment_args, dict):
+            ports_json_str = deployment_args.get("GenericModule.App.Ports") or ""
+            if isinstance(ports_json_str, str) and ports_json_str.strip():
+                try:
+                    ports_list = json.loads(ports_json_str)
+                    if isinstance(ports_list, list):
+                        for port_def in ports_list:
+                            if not isinstance(port_def, dict):
+                                continue
+                            port = port_def.get("Port")
+                            if isinstance(port, int) and 1 <= port <= 65535:
+                                ports.add(port)
+                except Exception:
+                    pass
 
         mappings: set[tuple[str, int]] = set()
         for port in ports:
