@@ -170,7 +170,129 @@ class AmpCloudflareSync:
             else:
                 dedup[key] = self.pick_richer_instance_row(current, row)
 
-        return list(dedup.values())
+        dedup_rows = list(dedup.values())
+        for row in dedup_rows:
+            await self.enrich_instance_network_data(ctrl, row)
+
+        return dedup_rows
+
+    async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
+        instance_id = self.pick_first_str(
+            row,
+            [
+                "InstanceID",
+                "instance_id",
+                "instanceId",
+                "Id",
+                "id",
+                "ID",
+                "UUID",
+                "Guid",
+                "GUID",
+            ],
+        )
+        instance_name = self.pick_first_str(
+            row,
+            [
+                "InstanceName",
+                "instance_name",
+                "FriendlyName",
+                "friendly_name",
+                "Name",
+                "name",
+            ],
+        )
+
+        endpoint_rows: List[Dict[str, Any]] = []
+
+        if instance_id:
+            try:
+                endpoint_data = await ctrl.get_application_endpoints(instance_id=instance_id, format_data=False)
+                endpoint_rows.extend(self._normalize_endpoint_rows(endpoint_data))
+            except Exception as exc:
+                logging.debug("GetApplicationEndpoints failed for %s: %s", instance_id, exc)
+
+        if instance_name:
+            try:
+                network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=False)
+                endpoint_rows.extend(self._normalize_endpoint_rows(network_data))
+            except Exception as exc:
+                logging.debug("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
+
+        if not endpoint_rows:
+            return
+
+        existing = row.get("application_endpoints") or row.get("ApplicationEndpoints") or []
+        if not isinstance(existing, list):
+            existing = []
+
+        row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
+
+    @staticmethod
+    def merge_endpoint_rows(existing: List[Any], new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for item in list(existing) + list(new_rows):
+            if not isinstance(item, dict):
+                continue
+            marker = json.dumps(item, sort_keys=True, default=str)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            merged.append(item)
+
+        return merged
+
+    @staticmethod
+    def _normalize_endpoint_rows(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+
+        if hasattr(value, "result"):
+            inner = getattr(value, "result", None)
+            if inner is not None:
+                value = inner
+
+        items: List[Any]
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+        else:
+            items = [value]
+
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+
+            row: Dict[str, Any] = {}
+            for src in (
+                "display_name",
+                "DisplayName",
+                "endpoint",
+                "Endpoint",
+                "uri",
+                "Uri",
+                "description",
+                "Description",
+                "port_number",
+                "PortNumber",
+                "protocol",
+                "Protocol",
+                "range",
+                "Range",
+                "provision_node_name",
+                "ProvisionNodeName",
+            ):
+                val = getattr(item, src, None)
+                if val is not None:
+                    row[src] = val
+
+            if row:
+                out.append(row)
+
+        return out
 
     @staticmethod
     def pick_richer_instance_row(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
