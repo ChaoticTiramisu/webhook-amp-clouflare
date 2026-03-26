@@ -928,25 +928,43 @@ class AmpCloudflareSync:
             except Exception:
                 conflict = None
 
+            protocol = desired["protocol"].upper()
+            lease = int(self.config.upnp_lease_seconds)
+
+            def add_with_optional_lease(lease_seconds: Optional[int]) -> Any:
+                if lease_seconds is None:
+                    return client.addportmapping(
+                        desired["external_port"],
+                        protocol,
+                        desired["internal_client"],
+                        desired["internal_port"],
+                        desired["description"],
+                        "",
+                    )
+                return client.addportmapping(
+                    desired["external_port"],
+                    protocol,
+                    desired["internal_client"],
+                    desired["internal_port"],
+                    desired["description"],
+                    "",
+                    lease_seconds,
+                )
+
             try:
-                ok = client.addportmapping(
-                    desired["external_port"],
-                    desired["protocol"].upper(),
-                    desired["internal_client"],
-                    desired["internal_port"],
-                    desired["description"],
-                    "",
-                    self.config.upnp_lease_seconds,
-                )
+                ok = add_with_optional_lease(lease)
             except TypeError:
-                ok = client.addportmapping(
-                    desired["external_port"],
-                    desired["protocol"].upper(),
-                    desired["internal_client"],
-                    desired["internal_port"],
-                    desired["description"],
-                    "",
-                )
+                ok = add_with_optional_lease(None)
+
+            # Some OpenWrt/miniupnpd setups reject explicit lease=0 but accept gateway-default lease.
+            if ok is False and lease == 0:
+                if self.config.upnp_debug:
+                    logging.info(
+                        "UPnP lease=0 rejected for %s/%s; retrying with gateway default lease",
+                        desired["external_port"],
+                        protocol,
+                    )
+                ok = add_with_optional_lease(None)
 
             if ok is False:
                 raise RuntimeError("gateway rejected addportmapping")
@@ -954,7 +972,7 @@ class AmpCloudflareSync:
             logging.info(
                 "Created UPnP mapping %s/%s -> %s:%s for instance '%s'",
                 desired["external_port"],
-                desired["protocol"].upper(),
+                protocol,
                 desired["internal_client"],
                 desired["internal_port"],
                 desired["instance_name"],
