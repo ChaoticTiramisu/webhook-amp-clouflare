@@ -699,6 +699,13 @@ class AmpCloudflareSync:
         if not isinstance(value, str):
             return None
         raw = value.strip().lower()
+        if raw.isdigit():
+            code = int(raw)
+            if code == 1:
+                return "udp"
+            if code == 2:
+                return "tcp"
+            return None
         if raw in ("tcp", "udp"):
             return raw
         return None
@@ -752,7 +759,8 @@ class AmpCloudflareSync:
                         key_s = str(key).lower()
                         if "port" in key_s or "endpoint" in key_s:
                             for port in AmpCloudflareSync.extract_ports_from_value(value):
-                                mappings.add((protocol, port))
+                                for proto in AmpCloudflareSync.expand_protocol_both_needed(protocol, port):
+                                    mappings.add((proto, port))
 
         # Secondary source: application endpoint rows from AMP API.
         endpoints: Any = []
