@@ -494,49 +494,75 @@ class AmpCloudflareSync:
     def extract_instance_ports(instance: Dict[str, Any]) -> List[int]:
         ports: set[int] = set()
 
+        # Only use ports AMP reports as application endpoints (Network tab).
         endpoints = instance.get("application_endpoints") or instance.get("ApplicationEndpoints") or []
         if isinstance(endpoints, list):
             for endpoint_obj in endpoints:
                 if not isinstance(endpoint_obj, dict):
                     continue
 
-                display_name = str(
-                    endpoint_obj.get("display_name")
-                    or endpoint_obj.get("DisplayName")
-                    or ""
-                ).lower()
-                if any(token in display_name for token in ("sftp", "ftp", "http", "web", "panel", "rcon")):
+                for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
+                    endpoint_val = endpoint_obj.get(endpoint_key)
+                    ports.update(AmpCloudflareSync.extract_ports_from_value(endpoint_val))
+
+                for port_key in ("port", "Port", "external_port", "ExternalPort"):
+                    port_val = endpoint_obj.get(port_key)
+                    ports.update(AmpCloudflareSync.extract_ports_from_value(port_val))
+
+        return sorted(ports)
+
+    @staticmethod
+    def extract_ports_from_value(value: Any) -> set[int]:
+        ports: set[int] = set()
+        if value is None:
+            return ports
+
+        if isinstance(value, bool):
+            return ports
+
+        if isinstance(value, int):
+            if 1 <= value <= 65535:
+                ports.add(value)
+            return ports
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return ports
+
+            # Avoid treating plain IPv4 addresses as ports.
+            if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", raw):
+                return ports
+
+            # Handle explicit ranges first, e.g. "27015-27020".
+            for start_s, end_s in re.findall(r"(?<![\d.])(\d{1,5})\s*-\s*(\d{1,5})(?![\d.])", raw):
+                start = int(start_s)
+                end = int(end_s)
+                low, high = sorted((start, end))
+                if high < 1 or low > 65535:
                     continue
+                for port in range(max(1, low), min(65535, high) + 1):
+                    ports.add(port)
 
-                endpoint = str(endpoint_obj.get("endpoint") or endpoint_obj.get("Endpoint") or "")
-                match = re.search(r":(\d+)$", endpoint.strip())
-                if match:
-                    port = int(match.group(1))
-                    if 1 <= port <= 65535:
-                        ports.add(port)
-
-        deployment_args = instance.get("deployment_args") or instance.get("DeploymentArgs") or {}
-        if isinstance(deployment_args, dict):
-            for key, value in deployment_args.items():
-                key_str = str(key).lower()
-                if "port" not in key_str or "sftp" in key_str:
-                    continue
-                value_str = str(value).strip()
-                if value_str.isdigit():
-                    port = int(value_str)
-                    if 1 <= port <= 65535:
-                        ports.add(port)
-
-        if not ports:
-            direct_port = instance.get("port") or instance.get("Port")
-            if isinstance(direct_port, int) and 1 <= direct_port <= 65535:
-                ports.add(direct_port)
-            elif isinstance(direct_port, str) and direct_port.isdigit():
-                port = int(direct_port)
+            # Also capture single ports in text, e.g. "25565,25575/udp".
+            for port_s in re.findall(r"(?<![\d.])(\d{1,5})(?![\d.])", raw):
+                port = int(port_s)
                 if 1 <= port <= 65535:
                     ports.add(port)
 
-        return sorted(ports)
+            return ports
+
+        if isinstance(value, dict):
+            for nested in value.values():
+                ports.update(AmpCloudflareSync.extract_ports_from_value(nested))
+            return ports
+
+        if isinstance(value, (list, tuple, set)):
+            for nested in value:
+                ports.update(AmpCloudflareSync.extract_ports_from_value(nested))
+            return ports
+
+        return ports
 
     def list_existing_managed_upnp_mappings(self, client: Any) -> Dict[str, Dict[str, Any]]:
         existing: Dict[str, Dict[str, Any]] = {}
