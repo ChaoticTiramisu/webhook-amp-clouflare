@@ -39,9 +39,19 @@ The installer will:
 - Clone/update the repo
 - Create `.venv`
 - Install dependencies
-- Prompt for AMP and Cloudflare settings
+- On install: prompt for AMP and Cloudflare settings
+- On update: reuse existing `.env` without prompting
 - Write `.env`
 - Optionally install/start systemd service
+
+Installer actions:
+
+- `Install`: interactive setup (writes `.env`)
+- `Update`: non-interactive code/dependency update, then migrates `.env` against `.env.example`
+	- Existing values are preserved
+	- New config keys are added with template defaults
+	- Legacy keys not present in new template are preserved at the bottom
+- `Remove`: uninstall service and delete install directory
 
 ## Required Cloudflare Permissions
 
