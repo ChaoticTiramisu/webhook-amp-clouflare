@@ -476,6 +476,11 @@ class AmpCloudflareSync:
                 continue
 
             ports = self.extract_instance_ports(instance)
+            if ports:
+                logging.info("UPnP ports for '%s': %s", raw_name, ",".join(str(p) for p in ports))
+            else:
+                logging.info("UPnP ports for '%s': none found in AMP endpoint data", raw_name)
+
             for port in ports:
                 for protocol in self.config.upnp_protocols:
                     key = f"{protocol}:{port}"
@@ -495,7 +500,32 @@ class AmpCloudflareSync:
         ports: set[int] = set()
 
         # Only use ports AMP reports as application endpoints (Network tab).
-        endpoints = instance.get("application_endpoints") or instance.get("ApplicationEndpoints") or []
+        endpoints: Any = []
+        for key in (
+            "application_endpoints",
+            "ApplicationEndpoints",
+            "endpoints",
+            "Endpoints",
+            "network_endpoints",
+            "NetworkEndpoints",
+        ):
+            value = instance.get(key)
+            if value:
+                endpoints = value
+                break
+
+        if isinstance(endpoints, str):
+            try:
+                parsed = json.loads(endpoints)
+                endpoints = parsed
+            except Exception:
+                endpoints = []
+
+        if isinstance(endpoints, dict):
+            nested = endpoints.get("items") or endpoints.get("Items") or endpoints.get("endpoints") or endpoints.get("Endpoints")
+            if isinstance(nested, list):
+                endpoints = nested
+
         if isinstance(endpoints, list):
             for endpoint_obj in endpoints:
                 if not isinstance(endpoint_obj, dict):
