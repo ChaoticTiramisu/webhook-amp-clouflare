@@ -411,10 +411,19 @@ class AmpCloudflareSync:
                 ("host", "Host"),
                 ("address", "Address"),
                 ("public_address", "PublicAddress"),
+                ("application_endpoints", "ApplicationEndpoints"),
+                ("ApplicationEndpoints", "ApplicationEndpoints"),
+                ("deployment_args", "DeploymentArgs"),
+                ("DeploymentArgs", "DeploymentArgs"),
             ):
                 val = getattr(item, src, None)
-                if isinstance(val, str) and val:
-                    row[dst] = val
+                if val is not None:
+                    # For complex fields like ApplicationEndpoints and DeploymentArgs,
+                    # preserve them even if they're not strings.
+                    if src in ("application_endpoints", "ApplicationEndpoints", "deployment_args", "DeploymentArgs"):
+                        row[dst] = val
+                    elif isinstance(val, str) and val:
+                        row[dst] = val
 
             if row:
                 out.append(row)
