@@ -281,17 +281,52 @@ EOF
   echo "Wrote configuration to $install_dir/.env"
 }
 
-restart_service_if_present() {
-  local systemctl_cmd="systemctl"
+run_systemctl() {
   if command -v sudo >/dev/null 2>&1; then
-    systemctl_cmd="sudo systemctl"
+    sudo systemctl "$@"
+  else
+    systemctl "$@"
+  fi
+}
+
+service_unit_exists() {
+  systemctl list-unit-files 2>/dev/null | grep -q '^amp-cf-srv-sync\.service'
+}
+
+service_is_active() {
+  if command -v sudo >/dev/null 2>&1; then
+    sudo systemctl is-active --quiet amp-cf-srv-sync
+  else
+    systemctl is-active --quiet amp-cf-srv-sync
+  fi
+}
+
+stop_service_for_update() {
+  if service_unit_exists && service_is_active; then
+    echo "Stopping systemd service before update..."
+    run_systemctl stop amp-cf-srv-sync
+    echo "yes"
+    return
   fi
 
-  if systemctl list-unit-files 2>/dev/null | grep -q '^amp-cf-srv-sync\.service'; then
-    echo "Restarting systemd service..."
-    $systemctl_cmd daemon-reload
-    $systemctl_cmd restart amp-cf-srv-sync || true
-    $systemctl_cmd status --no-pager amp-cf-srv-sync || true
+  echo "no"
+}
+
+start_service_after_update() {
+  local was_active="$1"
+
+  if ! service_unit_exists; then
+    return
+  fi
+
+  run_systemctl daemon-reload
+
+  if [[ "$was_active" == "yes" ]]; then
+    echo "Starting systemd service after update..."
+    run_systemctl start amp-cf-srv-sync || true
+    run_systemctl status --no-pager amp-cf-srv-sync || true
+  else
+    echo "Systemd service exists but was not running before update; leaving it stopped."
   fi
 }
 
@@ -310,12 +345,21 @@ install_or_update() {
 
   local repo_url="$DEFAULT_REPO_URL"
 
+  local service_was_active="no"
+  if [[ "$mode" == "update" ]]; then
+    service_was_active="$(stop_service_for_update)"
+    if [[ "$service_was_active" == "yes" ]]; then
+      trap 'start_service_after_update "yes" || true' EXIT
+    fi
+  fi
+
   sync_repo "$install_dir" "$repo_url"
   setup_venv "$install_dir"
 
   if [[ "$mode" == "update" ]]; then
     merge_env_from_template "$install_dir/.env.example" "$install_dir/.env"
-    restart_service_if_present
+    start_service_after_update "$service_was_active"
+    trap - EXIT
     echo
     echo "✓ Update complete"
     return
