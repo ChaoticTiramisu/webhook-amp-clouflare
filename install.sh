@@ -244,9 +244,6 @@ write_env_interactive() {
   local upnp_enabled
   upnp_enabled="$(prompt_default "Enable UPnP auto-port-forwarding (true/false)" "false")"
 
-  local upnp_protocols
-  upnp_protocols="$(prompt_default "UPnP protocols (tcp, udp, or tcp,udp)" "tcp")"
-
   local upnp_internal_client
   upnp_internal_client="$(prompt_default "UPnP internal client IP (optional)" "")"
 
@@ -270,7 +267,6 @@ DEFAULT_TARGET=$default_target
 PUBLIC_IP_SOURCE_RECORD=$public_ip_source_record
 PREFER_PUBLIC_IP_SOURCE=$prefer_public_ip_source
 UPNP_ENABLED=$upnp_enabled
-UPNP_PROTOCOLS=$upnp_protocols
 UPNP_INTERNAL_CLIENT=$upnp_internal_client
 UPNP_DESCRIPTION_PREFIX=amp-sync-upnp:
 UPNP_LEASE_SECONDS=$upnp_lease_seconds

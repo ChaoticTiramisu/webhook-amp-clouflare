@@ -63,7 +63,6 @@ class Config:
     public_ip_source_record: str
     prefer_public_ip_source: bool
     upnp_enabled: bool
-    upnp_protocols: List[str]
     upnp_debug: bool
     upnp_internal_client: str
     upnp_description_prefix: str
@@ -91,8 +90,6 @@ class AmpCloudflareSync:
         existing_managed = self.list_existing_managed_dns_records()
         self.reconcile(desired, existing_managed)
         self.reconcile_upnp(instances)
-
-
 
     def fetch_amp_instances(self) -> List[Dict[str, Any]]:
         return self.fetch_amp_instances_via_cc_ampapi()
@@ -654,9 +651,13 @@ class AmpCloudflareSync:
             if not subdomain:
                 continue
 
-            ports = self.extract_instance_ports(instance)
-            if ports:
-                logging.info("UPnP ports for '%s': %s", raw_name, ",".join(str(p) for p in ports))
+            mappings = self.extract_instance_port_protocols(instance)
+            if mappings:
+                logging.info(
+                    "UPnP mappings for '%s': %s",
+                    raw_name,
+                    ", ".join(f"{proto}:{port}" for proto, port in mappings),
+                )
             else:
                 logging.info("UPnP ports for '%s': none found in AMP network data", raw_name)
 
@@ -670,23 +671,46 @@ class AmpCloudflareSync:
                     len(endpoint_rows) if isinstance(endpoint_rows, list) else 0,
                 )
 
-            for port in ports:
-                for protocol in self.config.upnp_protocols:
-                    key = f"{protocol}:{port}"
-                    desired[key] = {
-                        "external_port": port,
-                        "internal_port": port,
-                        "internal_client": internal_client,
-                        "protocol": protocol,
-                        "description": f"{self.config.upnp_description_prefix}{instance_id}",
-                        "instance_name": raw_name,
-                    }
+            for protocol, port in mappings:
+                key = f"{protocol}:{port}"
+                desired[key] = {
+                    "external_port": port,
+                    "internal_port": port,
+                    "internal_client": internal_client,
+                    "protocol": protocol,
+                    "description": f"{self.config.upnp_description_prefix}{instance_id}",
+                    "instance_name": raw_name,
+                }
 
         return desired
 
     @staticmethod
     def extract_instance_ports(instance: Dict[str, Any]) -> List[int]:
-        ports: set[int] = set()
+        return sorted({port for _, port in AmpCloudflareSync.extract_instance_port_protocols(instance)})
+
+    @staticmethod
+    def normalize_protocol(value: Optional[str]) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().lower()
+        if raw in ("tcp", "udp"):
+            return raw
+        return None
+
+    @staticmethod
+    def extract_protocol_from_text(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip().lower()
+        if raw.startswith("tcp://"):
+            return "tcp"
+        if raw.startswith("udp://"):
+            return "udp"
+        return None
+
+    @staticmethod
+    def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
+        mappings: set[tuple[str, int]] = set()
 
         # Primary source: ADSModule.get_instance_network_info (PortInfo rows).
         network_info = instance.get("instance_network_info") or instance.get("InstanceNetworkInfo") or []
@@ -695,21 +719,26 @@ class AmpCloudflareSync:
                 if not isinstance(row, dict):
                     continue
 
+                protocol = AmpCloudflareSync.normalize_protocol(
+                    AmpCloudflareSync.pick_first_str(row, ["protocol", "Protocol", "proto", "Proto"])
+                )
                 base_port = AmpCloudflareSync.pick_first_int(row, ["port_number", "PortNumber", "port", "Port"])
                 port_range = AmpCloudflareSync.pick_first_int(row, ["range", "Range"]) or 1
 
-                if base_port and 1 <= base_port <= 65535:
+                if protocol and base_port and 1 <= base_port <= 65535:
                     width = max(1, min(port_range, 65535 - base_port + 1))
                     for port in range(base_port, base_port + width):
-                        ports.add(port)
+                        mappings.add((protocol, port))
 
-                # Parse any endpoint-style values that may be present.
-                for key, value in row.items():
-                    key_s = str(key).lower()
-                    if "port" in key_s or "endpoint" in key_s:
-                        ports.update(AmpCloudflareSync.extract_ports_from_value(value))
+                if protocol:
+                    # Parse endpoint-style values that may encode ports in strings.
+                    for key, value in row.items():
+                        key_s = str(key).lower()
+                        if "port" in key_s or "endpoint" in key_s:
+                            for port in AmpCloudflareSync.extract_ports_from_value(value):
+                                mappings.add((protocol, port))
 
-        # Only use ports AMP reports as application endpoints (Network tab).
+        # Secondary source: application endpoint rows from AMP API.
         endpoints: Any = []
         for key in (
             "application_endpoints",
@@ -741,21 +770,35 @@ class AmpCloudflareSync:
                 if not isinstance(endpoint_obj, dict):
                     continue
 
+                protocol = AmpCloudflareSync.normalize_protocol(
+                    AmpCloudflareSync.pick_first_str(endpoint_obj, ["protocol", "Protocol", "proto", "Proto"])
+                )
+                if protocol is None:
+                    for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
+                        protocol = AmpCloudflareSync.extract_protocol_from_text(endpoint_obj.get(endpoint_key))
+                        if protocol:
+                            break
+
+                if protocol is None:
+                    continue
+
                 for endpoint_key in ("endpoint", "Endpoint", "public_endpoint", "PublicEndpoint", "url", "URL"):
                     endpoint_val = endpoint_obj.get(endpoint_key)
-                    ports.update(AmpCloudflareSync.extract_ports_from_value(endpoint_val))
+                    for port in AmpCloudflareSync.extract_ports_from_value(endpoint_val):
+                        mappings.add((protocol, port))
 
                 for port_key in ("port", "Port", "external_port", "ExternalPort"):
                     port_val = endpoint_obj.get(port_key)
-                    ports.update(AmpCloudflareSync.extract_ports_from_value(port_val))
+                    for port in AmpCloudflareSync.extract_ports_from_value(port_val):
+                        mappings.add((protocol, port))
 
-                # Some AMP modules expose configured ports under variant key names.
                 for key, value in endpoint_obj.items():
                     key_s = str(key).lower()
                     if "port" in key_s or "endpoint" in key_s:
-                        ports.update(AmpCloudflareSync.extract_ports_from_value(value))
+                        for port in AmpCloudflareSync.extract_ports_from_value(value):
+                            mappings.add((protocol, port))
 
-        return sorted(ports)
+        return sorted(mappings, key=lambda x: (x[1], x[0]))
 
     @staticmethod
     def extract_ports_from_value(value: Any) -> set[int]:
@@ -870,7 +913,7 @@ class AmpCloudflareSync:
                     desired["internal_port"],
                     desired["description"],
                     "",
-                    desired["upnp_lease_seconds"] if "upnp_lease_seconds" in desired else self.config.upnp_lease_seconds,
+                    self.config.upnp_lease_seconds,
                 )
             except TypeError:
                 ok = client.addportmapping(
@@ -1210,15 +1253,6 @@ def parse_config() -> Config:
         if x.strip()
     ]
 
-    upnp_protocols = [
-        x.strip().lower()
-        for x in os.getenv("UPNP_PROTOCOLS", "tcp").split(",")
-        if x.strip()
-    ]
-    upnp_protocols = [p for p in upnp_protocols if p in ("tcp", "udp")]
-    if not upnp_protocols:
-        upnp_protocols = ["tcp"]
-
     amp_username = os.getenv("AMP_USERNAME", "").strip()
     amp_password = os.getenv("AMP_PASSWORD", "").strip()
 
@@ -1242,7 +1276,6 @@ def parse_config() -> Config:
             os.getenv("PREFER_PUBLIC_IP_SOURCE", "true"), default=True
         ),
         upnp_enabled=AmpCloudflareSync.parse_bool(os.getenv("UPNP_ENABLED", "false"), default=False),
-        upnp_protocols=upnp_protocols,
         upnp_debug=AmpCloudflareSync.parse_bool(os.getenv("UPNP_DEBUG", "false"), default=False),
         upnp_internal_client=os.getenv("UPNP_INTERNAL_CLIENT", "").strip(),
         upnp_description_prefix=os.getenv("UPNP_DESCRIPTION_PREFIX", "amp-sync-upnp:").strip() or "amp-sync-upnp:",
