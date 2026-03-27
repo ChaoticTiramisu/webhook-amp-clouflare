@@ -82,14 +82,25 @@ class AmpCloudflareSync:
     def run_sync(self, reason: str) -> None:
         with self.sync_lock:
             logging.info("Running sync (%s)", reason)
-            self.sync_once()
+            try:
+                self.sync_once()
+            except Exception as exc:
+                logging.exception("Sync failed (%s): %s", reason, exc)
 
     def sync_once(self) -> None:
         instances = self.fetch_amp_instances()
-        desired_dns = self.build_desired_records(instances)
-        existing_managed_dns = self.list_existing_managed_dns_records()
-        self.reconcile(desired_dns, existing_managed_dns)
-        self.reconcile_upnp(instances)
+
+        try:
+            desired_dns = self.build_desired_records(instances)
+            existing_managed_dns = self.list_existing_managed_dns_records()
+            self.reconcile(desired_dns, existing_managed_dns)
+        except Exception as exc:
+            logging.warning("Cloudflare DNS phase failed this cycle: %s", exc)
+
+        try:
+            self.reconcile_upnp(instances)
+        except Exception as exc:
+            logging.warning("UPnP phase failed this cycle: %s", exc)
 
     def fetch_amp_instances(self) -> List[Dict[str, Any]]:
         if not HAS_CC_AMPAPI:
@@ -180,12 +191,15 @@ class AmpCloudflareSync:
 
             row: Dict[str, Any] = {}
             # Dataclass/Object attributes might be snake_case or PascalCase
+            # ADDED "Port", "port", "Name", "name" so network_info doesn't get erased!
             for src in (
                 "display_name", "DisplayName", 
+                "name", "Name",
                 "endpoint", "Endpoint", 
                 "uri", "Uri", 
                 "description", "Description", 
                 "port_number", "PortNumber", 
+                "port", "Port",  
                 "protocol", "Protocol", 
                 "range", "Range"
             ):
@@ -249,35 +263,71 @@ class AmpCloudflareSync:
         """Scans the normalized instance data to reliably find application ports while skipping management ports."""
         ports: set[int] = set()
 
-        # Combine both endpoint pools into a single loop
+        # Combine both endpoint pools into a single list
         endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or[])
 
         for ep in endpoints:
-            # 1. Skip SFTP or File management ports (Checking multiple casings)
+            # 1. Skip SFTP or File management ports
             name = str(ep.get("display_name") or ep.get("DisplayName") or ep.get("name") or ep.get("Name") or "")
             if name and "sftp" in name.lower():
                 continue
 
-            # 2. Extract strictly defined integer ports
-            port = ep.get("port_number") or ep.get("PortNumber") or ep.get("port") or ep.get("Port")
-            if port is not None:
-                try:
-                    port_int = int(port)
-                    if 1 <= port_int <= 65535:
-                        ports.add(port_int)
-                        continue
-                except (ValueError, TypeError):
-                    pass
+            base_port = None
 
-            # 3. Fallback: Parse string endpoints (e.g., "0.0.0.0:25565" or "tcp://0.0.0.0:25565")
-            endpoint_str = str(ep.get("endpoint") or ep.get("Endpoint") or ep.get("uri") or ep.get("Uri") or "")
-            if endpoint_str:
-                if "://" in endpoint_str:
-                    endpoint_str = endpoint_str.split("://")[-1]
-                if ":" in endpoint_str:
-                    port_str = endpoint_str.rsplit(":", 1)[-1].strip()
-                    if port_str.isdigit() and 1 <= int(port_str) <= 65535:
-                        ports.add(int(port_str))
+            # 2. Extract strictly defined integer ports FIRST
+            for key in ("port_number", "PortNumber", "port", "Port"):
+                val = ep.get(key)
+                if val is not None:
+                    try:
+                        p = int(val)
+                        if 1 <= p <= 65535:
+                            ports.add(p)
+                            base_port = p
+                    except (ValueError, TypeError):
+                        pass
+
+            # 3. Check for Port Ranges (e.g., if Range=2, it uses the base_port AND base_port+1)
+            if base_port is not None:
+                for r_key in ("range", "Range"):
+                    r_val = ep.get(r_key)
+                    if r_val is not None:
+                        try:
+                            r_int = int(r_val)
+                            if r_int > 1:
+                                for offset in range(1, r_int):
+                                    if 1 <= base_port + offset <= 65535:
+                                        ports.add(base_port + offset)
+                        except (ValueError, TypeError):
+                            pass
+
+            # 4. Extract from strings (endpoints/URIs) INDEPENDENTLY (No 'continue' used)
+            for key in ("endpoint", "Endpoint", "uri", "Uri"):
+                val_str = str(ep.get(key) or "").strip()
+                if not val_str:
+                    continue
+
+                # If it's literally just a port number as a string (e.g., "8888")
+                if val_str.isdigit():
+                    p = int(val_str)
+                    if 1 <= p <= 65535:
+                        ports.add(p)
+                    continue
+
+                # If it contains a colon, parse the URL/IP format
+                if ":" in val_str:
+                    # Strip out protocol prefixes like http:// or tcp://
+                    if "://" in val_str:
+                        val_str = val_str.split("://", 1)[-1]
+
+                    # Grab everything after the final colon
+                    last_part = val_str.rsplit(":", 1)[-1]
+
+                    # Extract leading numbers safely (handles strings like "8888/api")
+                    match = re.search(r"^(\d+)", last_part)
+                    if match:
+                        p = int(match.group(1))
+                        if 1 <= p <= 65535:
+                            ports.add(p)
 
         # Build UDP/TCP protocol combinations for every found port
         mappings: set[Tuple[str, int]] = set()
