@@ -162,14 +162,20 @@ class AmpCloudflareSync:
         """Safely converts the raw AMP dataclass into a standardized dictionary."""
         row: Dict[str, Any] = {}
 
-        # Core string/int fields
-        for src in ("friendly_name", "instance_name", "instance_id", "ip", "deployment_args"):
+        # Core string/int fields (AMP API uses PascalCase for root objects)
+        for src in (
+            "friendly_name", "FriendlyName",
+            "instance_name", "InstanceName",
+            "instance_id", "InstanceID",
+            "ip", "IP",
+            "deployment_args"
+        ):
             val = getattr(instance_obj, src, None)
             if val is not None:
                 row[src] = val
 
         # Safely convert the application_endpoints dataclasses into a list of dictionaries
-        endpoints = getattr(instance_obj, "application_endpoints", None)
+        endpoints = getattr(instance_obj, "application_endpoints", None) or getattr(instance_obj, "ApplicationEndpoints", None)
         if endpoints:
             row["application_endpoints"] = AmpCloudflareSync._normalize_endpoint_rows(endpoints)
 
@@ -214,8 +220,9 @@ class AmpCloudflareSync:
 
     async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
         """Fetches extra network data if the initial instance query didn't provide everything."""
-        instance_id = row.get("instance_id")
-        instance_name = row.get("instance_name")
+        # Grab the Instance Name (checking both casings so the API call doesn't fail)
+        instance_id = row.get("instance_id") or row.get("InstanceID")
+        instance_name = row.get("instance_name") or row.get("InstanceName")
 
         endpoint_rows: List[Dict[str, Any]] = []
         network_rows: List[Dict[str, Any]] =[]
