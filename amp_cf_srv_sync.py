@@ -142,6 +142,13 @@ class AmpCloudflareSync:
         result = await ctrl.get_instances(include_self=True, format_data=False)
         logging.info("Raw result type: %s", type(result).__name__)
 
+        # Print exactly what the API gave us so we can see the true structure
+        if isinstance(result, list):
+            logging.info("List length: %d", len(result))
+            if len(result) > 0:
+                snippet = str(result[0])[:500] if not isinstance(result[0], dict) else json.dumps(result[0])[:500]
+                logging.info("First item type: %s, snippet: %s", type(result[0]).__name__, snippet)
+        
         # Unwrap if we got a list with a single dict that has "Result"
         if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "Result" in result[0]:
              logging.info("Unwrapping result[0]['Result']")
