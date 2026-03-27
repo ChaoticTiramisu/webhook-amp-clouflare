@@ -138,17 +138,17 @@ class AmpCloudflareSync:
     async def _fetch_amp_instances_async(self) -> List[Dict[str, Any]]:
         ctrl = await self._ensure_amp_controller_async()
         
-        # format_data=True returns strictly formatted python dataclasses 
-        result = await ctrl.get_instances(include_self=True, format_data=True)
+        # FIX: Set format_data=False to get raw dictionaries as per the docs
+        result = await ctrl.get_instances(include_self=True, format_data=False)
 
         if not isinstance(result, (list, set, tuple)):
             raise RuntimeError(f"AMP get_instances returned unexpected type: {type(result).__name__}")
 
         rows: List[Dict[str, Any]] =[]
         for instance_obj in result:
-            row = self._instance_obj_to_row(instance_obj)
-            if row:
-                rows.append(row)
+            # We don't need _instance_obj_to_row anymore if it's already a dict!
+            if isinstance(instance_obj, dict):
+                rows.append(instance_obj)
 
         for row in rows:
             await self.enrich_instance_network_data(ctrl, row)
@@ -187,6 +187,13 @@ class AmpCloudflareSync:
         if value is None:
             return[]
 
+        # If the API wrapped the array in a result dictionary, unwrap it to access the data!
+        if isinstance(value, dict):
+            if "Result" in value and isinstance(value["Result"], (list, tuple)):
+                value = value["Result"]
+            elif "result" in value and isinstance(value["result"], (list, tuple)):
+                value = value["result"]
+
         items = list(value) if isinstance(value, (list, tuple, set)) else [value]
         out: List[Dict[str, Any]] =[]
         
@@ -196,8 +203,6 @@ class AmpCloudflareSync:
                 continue
 
             row: Dict[str, Any] = {}
-            # Dataclass/Object attributes might be snake_case or PascalCase
-            # ADDED "Port", "port", "Name", "name" so network_info doesn't get erased!
             for src in (
                 "display_name", "DisplayName", 
                 "name", "Name",
@@ -219,35 +224,38 @@ class AmpCloudflareSync:
         return out
 
     async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
-        """Fetches extra network data if the initial instance query didn't provide everything."""
-        # Grab the Instance Name (checking both casings so the API call doesn't fail)
-        instance_id = row.get("instance_id") or row.get("InstanceID")
-        instance_name = row.get("instance_name") or row.get("InstanceName")
+        # Since it's a raw dictionary, the keys match the AMP server directly
+        instance_id = row.get("InstanceID")
+        instance_name = row.get("InstanceName") or row.get("FriendlyName")
 
-        endpoint_rows: List[Dict[str, Any]] = []
+        endpoint_rows: List[Dict[str, Any]] =[]
         network_rows: List[Dict[str, Any]] =[]
 
         if instance_id:
             try:
-                endpoint_data = await ctrl.get_application_endpoints(instance_id=instance_id, format_data=True)
-                endpoint_rows.extend(self._normalize_endpoint_rows(endpoint_data))
+                # FIX: Request raw dictionaries
+                endpoint_data = await ctrl.get_application_endpoints(instance_id=instance_id, format_data=False)
+                # Unwrap the raw API "Result" array if it exists
+                if isinstance(endpoint_data, dict) and "Result" in endpoint_data:
+                    endpoint_rows.extend(endpoint_data["Result"])
+                elif isinstance(endpoint_data, list):
+                    endpoint_rows.extend(endpoint_data)
             except Exception as exc:
-                logging.debug("GetApplicationEndpoints failed for %s: %s", instance_id, exc)
+                logging.warning("GetApplicationEndpoints failed for %s: %s", instance_id, exc)
 
         if instance_name:
             try:
-                network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=True)
-                network_rows.extend(self._normalize_endpoint_rows(network_data))
+                # FIX: Request raw dictionaries
+                network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=False)
+                if isinstance(network_data, dict) and "Result" in network_data:
+                    network_rows.extend(network_data["Result"])
+                elif isinstance(network_data, list):
+                    network_rows.extend(network_data)
             except Exception as exc:
-                logging.debug("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
+                logging.warning("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
 
-        if endpoint_rows:
-            existing = row.get("application_endpoints", [])
-            row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
-
-        if network_rows:
-            existing_network = row.get("instance_network_info", [])
-            row["instance_network_info"] = self.merge_endpoint_rows(existing_network, network_rows)
+        row["application_endpoints"] = endpoint_rows
+        row["instance_network_info"] = network_rows
 
     @staticmethod
     def merge_endpoint_rows(existing: List[Dict[str, Any]], new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
