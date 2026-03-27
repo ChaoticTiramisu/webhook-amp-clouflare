@@ -179,9 +179,15 @@ class AmpCloudflareSync:
                 continue
 
             row: Dict[str, Any] = {}
+            # Dataclass/Object attributes might be snake_case or PascalCase
             for src in (
-                "display_name", "endpoint", "uri", "description", 
-                "port_number", "protocol", "range"
+                "display_name", "DisplayName", 
+                "endpoint", "Endpoint", 
+                "uri", "Uri", 
+                "description", "Description", 
+                "port_number", "PortNumber", 
+                "protocol", "Protocol", 
+                "range", "Range"
             ):
                 val = getattr(item, src, None)
                 if val is not None:
@@ -247,13 +253,13 @@ class AmpCloudflareSync:
         endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or[])
 
         for ep in endpoints:
-            # 1. Skip SFTP or File management ports
-            name = str(ep.get("display_name", ""))
+            # 1. Skip SFTP or File management ports (Checking multiple casings)
+            name = str(ep.get("display_name") or ep.get("DisplayName") or ep.get("name") or ep.get("Name") or "")
             if name and "sftp" in name.lower():
                 continue
 
             # 2. Extract strictly defined integer ports
-            port = ep.get("port_number")
+            port = ep.get("port_number") or ep.get("PortNumber") or ep.get("port") or ep.get("Port")
             if port is not None:
                 try:
                     port_int = int(port)
@@ -263,12 +269,15 @@ class AmpCloudflareSync:
                 except (ValueError, TypeError):
                     pass
 
-            # 3. Fallback: Parse string endpoints (e.g., "0.0.0.0:25565")
-            endpoint_str = str(ep.get("endpoint", ""))
-            if endpoint_str and ":" in endpoint_str:
-                port_str = endpoint_str.rsplit(":", 1)[-1].strip()
-                if port_str.isdigit() and 1 <= int(port_str) <= 65535:
-                    ports.add(int(port_str))
+            # 3. Fallback: Parse string endpoints (e.g., "0.0.0.0:25565" or "tcp://0.0.0.0:25565")
+            endpoint_str = str(ep.get("endpoint") or ep.get("Endpoint") or ep.get("uri") or ep.get("Uri") or "")
+            if endpoint_str:
+                if "://" in endpoint_str:
+                    endpoint_str = endpoint_str.split("://")[-1]
+                if ":" in endpoint_str:
+                    port_str = endpoint_str.rsplit(":", 1)[-1].strip()
+                    if port_str.isdigit() and 1 <= int(port_str) <= 65535:
+                        ports.add(int(port_str))
 
         # Build UDP/TCP protocol combinations for every found port
         mappings: set[Tuple[str, int]] = set()
