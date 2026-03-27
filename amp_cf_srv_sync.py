@@ -7,7 +7,6 @@ import re
 import socket
 import threading
 import time
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -160,12 +159,16 @@ class AmpCloudflareSync:
             ("instance_name", "InstanceName"),
             ("instance_id", "InstanceID"),
             ("ip", "IP"),
-            ("application_endpoints", "application_endpoints"),
             ("deployment_args", "deployment_args"),
         ):
             value = getattr(instance_obj, src, None)
             if value is not None:
                 row[dst] = value
+
+        # Ensure endpoints are always normalized dict rows, even when AMPAPI returns dataclasses.
+        endpoints = getattr(instance_obj, "application_endpoints", None)
+        if endpoints is not None:
+            row["application_endpoints"] = AmpCloudflareSync._normalize_endpoint_rows(endpoints)
 
         return row
 
@@ -572,106 +575,37 @@ class AmpCloudflareSync:
         return sorted({port for _, port in AmpCloudflareSync.extract_instance_port_protocols(instance)})
 
     @staticmethod
-    def is_sftp_management_row(value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-
-        for key in (
-            "display_name",
-            "DisplayName",
-            "description",
-            "Description",
-            "name",
-            "Name",
-            "title",
-            "Title",
-            "type",
-            "Type",
-        ):
-            text = value.get(key)
-            if isinstance(text, str) and "sftp" in text.lower():
-                return True
-
-        return False
-
-    @staticmethod
-    def api_port_value(value: Any) -> Optional[int]:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value if 1 <= value <= 65535 else None
-        if isinstance(value, str) and value.strip().isdigit():
-            port = int(value.strip())
-            return port if 1 <= port <= 65535 else None
-        return None
-
-    @staticmethod
-    def api_endpoint_port(value: Any) -> Optional[int]:
-        if not isinstance(value, str):
-            return None
-        raw = value.strip()
-        if not raw:
-            return None
-
-        parsed = urlparse(raw)
-        if not parsed.scheme or parsed.scheme.lower() not in ("tcp", "udp"):
-            return None
-
-        try:
-            port = parsed.port
-        except ValueError:
-            return None
-
-        if port is None or not (1 <= port <= 65535):
-            return None
-
-        return port
-
-    @staticmethod
     def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
         ports: set[int] = set()
 
-        # Source 1: ADSModule.get_instance_network_info -> list[PortInfo].
-        network_rows = instance.get("instance_network_info") or []
-        if isinstance(network_rows, list):
-            for row in network_rows:
-                if not isinstance(row, dict):
-                    continue
-                if AmpCloudflareSync.is_sftp_management_row(row):
-                    continue
-                port = AmpCloudflareSync.api_port_value(
-                    row.get("port_number")
-                    or row.get("PortNumber")
-                    or row.get("port")
-                    or row.get("Port")
-                )
-                if port is not None:
-                    ports.add(port)
+        # Process both network info and app endpoints in one pass.
+        endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or [])
 
-        # Source 2: Instance.application_endpoints / ADSModule.get_application_endpoints.
-        app_endpoints = instance.get("application_endpoints") or []
-        if isinstance(app_endpoints, list):
-            for endpoint_obj in app_endpoints:
-                if not isinstance(endpoint_obj, dict):
-                    continue
-                if AmpCloudflareSync.is_sftp_management_row(endpoint_obj):
-                    continue
+        for endpoint_obj in endpoints:
+            is_dict = isinstance(endpoint_obj, dict)
 
-                endpoint_str = endpoint_obj.get("endpoint") or endpoint_obj.get("Endpoint")
-                if isinstance(endpoint_str, str) and ":" in endpoint_str:
-                    try:
-                        port_str = endpoint_str.rsplit(":", 1)[1].strip()
-                        if port_str.isdigit():
-                            port = int(port_str)
-                            if 1 <= port <= 65535:
-                                ports.add(port)
-                    except (ValueError, IndexError):
-                        pass
+            # Skip SFTP management ports.
+            display_name = endpoint_obj.get("display_name", "") if is_dict else getattr(endpoint_obj, "display_name", "")
+            description = endpoint_obj.get("description", "") if is_dict else getattr(endpoint_obj, "description", "")
+            name_text = display_name or description
+            if name_text and "sftp" in str(name_text).lower():
+                continue
 
-                uri_str = endpoint_obj.get("uri") or endpoint_obj.get("Uri")
-                endpoint_port = AmpCloudflareSync.api_endpoint_port(uri_str)
-                if endpoint_port is not None:
-                    ports.add(endpoint_port)
+            # Prefer direct numeric PortInfo.port_number values.
+            port_value = endpoint_obj.get("port_number") if is_dict else getattr(endpoint_obj, "port_number", None)
+            try:
+                if port_value is not None and 1 <= int(port_value) <= 65535:
+                    ports.add(int(port_value))
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+            # Fallback to Endpoints.endpoint values such as "0.0.0.0:25565".
+            endpoint_text = endpoint_obj.get("endpoint", "") if is_dict else getattr(endpoint_obj, "endpoint", "")
+            if endpoint_text and ":" in str(endpoint_text):
+                port_text = str(endpoint_text).rsplit(":", 1)[-1].strip()
+                if port_text.isdigit() and 1 <= int(port_text) <= 65535:
+                    ports.add(int(port_text))
 
         mappings: set[tuple[str, int]] = set()
         for port in ports:
