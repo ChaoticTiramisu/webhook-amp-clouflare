@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -73,7 +73,7 @@ class AmpCloudflareSync:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.http = requests.Session()
-        self.http.headers.update({"User-Agent": "amp-cf-srv-sync/1.0"})
+        self.http.headers.update({"User-Agent": "amp-cf-srv-sync/2.0"})
         self.sync_lock = threading.Lock()
         self.amp_loop = asyncio.new_event_loop()
         self.amp_controller: Any = None
@@ -86,35 +86,29 @@ class AmpCloudflareSync:
 
     def sync_once(self) -> None:
         instances = self.fetch_amp_instances()
-        desired = self.build_desired_records(instances)
-        existing_managed = self.list_existing_managed_dns_records()
-        self.reconcile(desired, existing_managed)
+        desired_dns = self.build_desired_records(instances)
+        existing_managed_dns = self.list_existing_managed_dns_records()
+        self.reconcile(desired_dns, existing_managed_dns)
         self.reconcile_upnp(instances)
 
     def fetch_amp_instances(self) -> List[Dict[str, Any]]:
-        return self.fetch_amp_instances_via_cc_ampapi()
-
-    def fetch_amp_instances_via_cc_ampapi(self) -> List[Dict[str, Any]]:
         if not HAS_CC_AMPAPI:
             raise RuntimeError(
-                "cc-ampapi is not installed. "
-                "Install dependencies from requirements.txt"
+                "ampapi is not installed. Install dependencies from requirements.txt"
             )
 
         if not self.config.amp_username or not self.config.amp_password:
-            raise RuntimeError(
-                "AMP_USERNAME/AMP_PASSWORD are missing"
-            )
+            raise RuntimeError("AMP_USERNAME/AMP_PASSWORD are missing")
 
         try:
             instances = self.amp_loop.run_until_complete(self._fetch_amp_instances_async())
-        except Exception:
-            # If session/auth state got stale, recreate the controller once and retry.
+        except Exception as exc:
+            logging.debug("Error fetching instances, recreating session: %s", exc)
             self.amp_loop.run_until_complete(self._close_amp_controller_async())
             self.amp_controller = None
             instances = self.amp_loop.run_until_complete(self._fetch_amp_instances_async())
 
-        logging.info("Fetched %d AMP instances via cc-ampapi", len(instances))
+        logging.info("Fetched %d AMP instances via ampapi", len(instances))
         return instances
 
     async def _ensure_amp_controller_async(self) -> Any:
@@ -128,17 +122,18 @@ class AmpCloudflareSync:
         )
         Bridge(api_params=params)
         self.amp_controller = AMPControllerInstance()
-        self.amp_controller.format_data = False
         return self.amp_controller
 
     async def _fetch_amp_instances_async(self) -> List[Dict[str, Any]]:
         ctrl = await self._ensure_amp_controller_async()
+        
+        # format_data=True returns strictly formatted python dataclasses 
         result = await ctrl.get_instances(include_self=True, format_data=True)
 
         if not isinstance(result, (list, set, tuple)):
             raise RuntimeError(f"AMP get_instances returned unexpected type: {type(result).__name__}")
 
-        rows: List[Dict[str, Any]] = []
+        rows: List[Dict[str, Any]] =[]
         for instance_obj in result:
             row = self._instance_obj_to_row(instance_obj)
             if row:
@@ -149,58 +144,61 @@ class AmpCloudflareSync:
 
         return rows
 
+    # --- DATA NORMALIZATION & EXTRACTION ---
+
     @staticmethod
     def _instance_obj_to_row(instance_obj: Any) -> Dict[str, Any]:
+        """Safely converts the raw AMP dataclass into a standardized dictionary."""
         row: Dict[str, Any] = {}
 
-        # Documented fields from ampapi.modules.Instance.
-        for src, dst in (
-            ("friendly_name", "FriendlyName"),
-            ("instance_name", "InstanceName"),
-            ("instance_id", "InstanceID"),
-            ("ip", "IP"),
-            ("deployment_args", "deployment_args"),
-        ):
-            value = getattr(instance_obj, src, None)
-            if value is not None:
-                row[dst] = value
+        # Core string/int fields
+        for src in ("friendly_name", "instance_name", "instance_id", "ip", "deployment_args"):
+            val = getattr(instance_obj, src, None)
+            if val is not None:
+                row[src] = val
 
-        # Ensure endpoints are always normalized dict rows, even when AMPAPI returns dataclasses.
+        # Safely convert the application_endpoints dataclasses into a list of dictionaries
         endpoints = getattr(instance_obj, "application_endpoints", None)
-        if endpoints is not None:
+        if endpoints:
             row["application_endpoints"] = AmpCloudflareSync._normalize_endpoint_rows(endpoints)
 
         return row
 
+    @staticmethod
+    def _normalize_endpoint_rows(value: Any) -> List[Dict[str, Any]]:
+        """Converts lists of Endpoints/PortInfo dataclasses into simple Python dictionaries."""
+        if value is None:
+            return[]
+
+        items = list(value) if isinstance(value, (list, tuple, set)) else [value]
+        out: List[Dict[str, Any]] =[]
+        
+        for item in items:
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+
+            row: Dict[str, Any] = {}
+            for src in (
+                "display_name", "endpoint", "uri", "description", 
+                "port_number", "protocol", "range"
+            ):
+                val = getattr(item, src, None)
+                if val is not None:
+                    row[src] = val
+
+            if row:
+                out.append(row)
+
+        return out
+
     async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
-        instance_id = self.pick_first_str(
-            row,
-            [
-                "InstanceID",
-                "instance_id",
-                "instanceId",
-                "Id",
-                "id",
-                "ID",
-                "UUID",
-                "Guid",
-                "GUID",
-            ],
-        )
-        instance_name = self.pick_first_str(
-            row,
-            [
-                "InstanceName",
-                "instance_name",
-                "FriendlyName",
-                "friendly_name",
-                "Name",
-                "name",
-            ],
-        )
+        """Fetches extra network data if the initial instance query didn't provide everything."""
+        instance_id = row.get("instance_id")
+        instance_name = row.get("instance_name")
 
         endpoint_rows: List[Dict[str, Any]] = []
-        network_rows: List[Dict[str, Any]] = []
+        network_rows: List[Dict[str, Any]] =[]
 
         if instance_id:
             try:
@@ -217,20 +215,16 @@ class AmpCloudflareSync:
                 logging.debug("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
 
         if endpoint_rows:
-            existing = row.get("application_endpoints") or []
-            if not isinstance(existing, list):
-                existing = []
+            existing = row.get("application_endpoints", [])
             row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
 
         if network_rows:
-            existing_network = row.get("instance_network_info") or []
-            if not isinstance(existing_network, list):
-                existing_network = []
+            existing_network = row.get("instance_network_info", [])
             row["instance_network_info"] = self.merge_endpoint_rows(existing_network, network_rows)
 
     @staticmethod
-    def merge_endpoint_rows(existing: List[Any], new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        merged: List[Dict[str, Any]] = []
+    def merge_endpoint_rows(existing: List[Dict[str, Any]], new_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] =[]
         seen: set[str] = set()
 
         for item in list(existing) + list(new_rows):
@@ -245,49 +239,48 @@ class AmpCloudflareSync:
         return merged
 
     @staticmethod
-    def _normalize_endpoint_rows(value: Any) -> List[Dict[str, Any]]:
-        if value is None:
-            return []
+    def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[Tuple[str, int]]:
+        """Scans the normalized instance data to reliably find application ports while skipping management ports."""
+        ports: set[int] = set()
 
-        items: List[Any]
-        if isinstance(value, (list, tuple, set)):
-            items = list(value)
-        else:
-            items = [value]
+        # Combine both endpoint pools into a single loop
+        endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or[])
 
-        out: List[Dict[str, Any]] = []
-        for item in items:
-            if isinstance(item, dict):
-                out.append(item)
+        for ep in endpoints:
+            # 1. Skip SFTP or File management ports
+            name = str(ep.get("display_name", ""))
+            if name and "sftp" in name.lower():
                 continue
 
-            row: Dict[str, Any] = {}
-            # Documented fields from ampapi.modules.Endpoints and ampapi.modules.PortInfo.
-            for src in (
-                "display_name",
-                "endpoint",
-                "uri",
-                "description",
-                "port_number",
-                "protocol",
-                "range",
-                "provision_node_name",
-                "us_user_defined",
-                "verified",
-            ):
-                val = getattr(item, src, None)
-                if val is not None:
-                    row[src] = val
+            # 2. Extract strictly defined integer ports
+            port = ep.get("port_number")
+            if port is not None:
+                try:
+                    port_int = int(port)
+                    if 1 <= port_int <= 65535:
+                        ports.add(port_int)
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
-            if row:
-                out.append(row)
+            # 3. Fallback: Parse string endpoints (e.g., "0.0.0.0:25565")
+            endpoint_str = str(ep.get("endpoint", ""))
+            if endpoint_str and ":" in endpoint_str:
+                port_str = endpoint_str.rsplit(":", 1)[-1].strip()
+                if port_str.isdigit() and 1 <= int(port_str) <= 65535:
+                    ports.add(int(port_str))
 
-        return out
+        # Build UDP/TCP protocol combinations for every found port
+        mappings: set[Tuple[str, int]] = set()
+        for port in ports:
+            mappings.add(("tcp", port))
+            mappings.add(("udp", port))
+
+        return sorted(mappings, key=lambda x: (x[1], x[0]))
 
     async def _close_amp_controller_async(self) -> None:
         if self.amp_controller is None:
             return
-
         ctrl = self.amp_controller
         self.amp_controller = None
         close_coro = getattr(ctrl, "__adel__", None)
@@ -306,27 +299,15 @@ class AmpCloudflareSync:
         finally:
             self.http.close()
 
+    # --- CLOUDFLARE DNS SYNC ---
+
     def build_desired_records(self, instances: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         desired: Dict[str, Dict[str, Any]] = {}
         domain = self.config.allowed_domain.lower().strip(".")
         public_target = self.get_public_target_from_cloudflare()
 
         for instance in instances:
-            raw_name = self.pick_first_str(
-                instance,
-                [
-                    "FriendlyName",
-                    "friendly_name",
-                    "DisplayName",
-                    "display_name",
-                    "InstanceName",
-                    "instance_name",
-                    "Name",
-                    "name",
-                    "Title",
-                    "title",
-                ],
-            )
+            raw_name = instance.get("friendly_name") or instance.get("instance_name")
             if not raw_name:
                 continue
 
@@ -334,43 +315,22 @@ class AmpCloudflareSync:
             if instance_name in self.config.ignored_names:
                 continue
 
-            instance_id = self.pick_first_str(
-                instance,
-                [
-                    "InstanceID",
-                    "instance_id",
-                    "instanceId",
-                    "Id",
-                    "id",
-                    "ID",
-                    "UUID",
-                    "Guid",
-                    "GUID",
-                ],
-            ) or instance_name
-
+            instance_id = instance.get("instance_id") or instance_name
             subdomain = self.extract_subdomain(instance_name, domain)
             if not subdomain:
                 continue
 
-            amp_target = self.pick_first_str(
-                instance,
-                ["IP", "Ip", "ip", "Address", "Host", "Hostname", "PublicAddress", "Target"],
-            )
-
+            amp_target = instance.get("ip")
             target = amp_target
-            if public_target and (
-                self.config.prefer_public_ip_source or self.is_private_or_loopback_target(amp_target)
-            ):
+
+            if public_target and (self.config.prefer_public_ip_source or self.is_private_or_loopback_target(amp_target)):
                 target = public_target
 
             if not target:
                 target = self.config.default_target
 
             if not target:
-                logging.warning(
-                    "Skipping '%s' (id=%s) because no target host could be found", raw_name, instance_id
-                )
+                logging.warning("Skipping '%s' (id=%s) because no target host could be found", raw_name, instance_id)
                 continue
 
             target = target.rstrip(".")
@@ -403,12 +363,11 @@ class AmpCloudflareSync:
             params={"name": source, "per_page": 100},
         )
 
-        records = result.get("result", [])
+        records = result.get("result",[])
         if not records:
             logging.warning("PUBLIC_IP_SOURCE_RECORD '%s' not found in Cloudflare", source)
             return None
 
-        # Prefer A/AAAA over CNAME; record order matters for deterministic behavior.
         sorted_records = sorted(
             records,
             key=lambda r: {"A": 0, "AAAA": 1, "CNAME": 2}.get((r.get("type") or "").upper(), 99),
@@ -419,6 +378,141 @@ class AmpCloudflareSync:
                 return content
 
         return None
+
+    def list_existing_managed_dns_records(self) -> Dict[str, List[Dict[str, Any]]]:
+        records_by_comment: Dict[str, List[Dict[str, Any]]] = {}
+        page = 1
+
+        while True:
+            result = self.cloudflare_request(
+                "GET",
+                f"/zones/{self.config.cloudflare_zone_id}/dns_records",
+                params={"page": page, "per_page": 500},
+            )
+
+            records = result.get("result",[])
+            if not records:
+                break
+
+            for record in records:
+                comment = (record.get("comment") or "").strip()
+                if not comment.startswith("amp-sync:"):
+                    continue
+                records_by_comment.setdefault(comment,[]).append(record)
+
+            info = result.get("result_info") or {}
+            total_pages = int(info.get("total_pages") or 1)
+            if page >= total_pages:
+                break
+            page += 1
+
+        return records_by_comment
+
+    def reconcile(self, desired: Dict[str, Dict[str, Any]], existing_by_comment: Dict[str, List[Dict[str, Any]]]) -> None:
+        desired_keys = set(desired.keys())
+        existing_keys = set(existing_by_comment.keys())
+
+        for comment, want in desired.items():
+            existing_list = existing_by_comment.get(comment,[])
+            if not existing_list:
+                self.create_record(want)
+                continue
+
+            primary = existing_list[0]
+            if not self.record_matches(primary, want):
+                self.update_record(primary["id"], want)
+
+            for duplicate in existing_list[1:]:
+                self.delete_record(duplicate["id"], duplicate.get("name", "<unknown>"))
+
+        stale_keys = existing_keys - desired_keys
+        for stale_comment in stale_keys:
+            for stale_record in existing_by_comment.get(stale_comment, []):
+                self.delete_record(stale_record["id"], stale_record.get("name", "<unknown>"))
+
+    def create_record(self, want: Dict[str, Any]) -> None:
+        payload = self.make_record_payload(want)
+        self.cloudflare_request(
+            "POST",
+            f"/zones/{self.config.cloudflare_zone_id}/dns_records",
+            json_data=payload,
+        )
+        logging.info("Created %s %s -> %s for instance '%s'", want["record_type"], want["record_name"], want["content"], want["instance_name"])
+
+    def update_record(self, record_id: str, want: Dict[str, Any]) -> None:
+        payload = self.make_record_payload(want)
+        self.cloudflare_request(
+            "PUT",
+            f"/zones/{self.config.cloudflare_zone_id}/dns_records/{record_id}",
+            json_data=payload,
+        )
+        logging.info("Updated %s %s -> %s for instance '%s'", want["record_type"], want["record_name"], want["content"], want["instance_name"])
+
+    def delete_record(self, record_id: str, record_name: str) -> None:
+        self.cloudflare_request(
+            "DELETE",
+            f"/zones/{self.config.cloudflare_zone_id}/dns_records/{record_id}",
+        )
+        logging.info("Deleted managed DNS record %s", record_name)
+
+    def record_matches(self, existing: Dict[str, Any], want: Dict[str, Any]) -> bool:
+        existing_name = (existing.get("name") or "").lower().strip(".")
+        want_name = f"{want['record_name']}.{self.config.allowed_domain}".lower().strip(".")
+
+        if existing_name != want_name:
+            return False
+        if (existing.get("type") or "").upper() != want["record_type"]:
+            return False
+        if int(existing.get("ttl") or 1) != int(self.config.dns_ttl):
+            return False
+        if str(existing.get("content") or "").rstrip(".") != str(want["content"]).rstrip("."):
+            return False
+        if bool(existing.get("proxied", False)) != self.config.dns_proxied:
+            return False
+
+        return True
+
+    def make_record_payload(self, want: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {
+            "type": want["record_type"],
+            "name": want["record_name"],
+            "content": want["content"],
+            "ttl": self.config.dns_ttl,
+            "comment": want["comment"],
+        }
+        if want["record_type"] in ("A", "AAAA", "CNAME"):
+            payload["proxied"] = self.config.dns_proxied
+        return payload
+
+    def cloudflare_request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        url = f"https://api.cloudflare.com/client/v4{path}"
+        headers = {
+            "Authorization": f"Bearer {self.config.cloudflare_api_token}",
+            "Content-Type": "application/json",
+        }
+
+        response = self.http.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            json=json_data,
+            timeout=25,
+        )
+
+        try:
+            body = response.json()
+        except json.JSONDecodeError:
+            response.raise_for_status()
+            raise RuntimeError(f"Cloudflare returned non-JSON response: {response.text}")
+
+        if not response.ok or not body.get("success", False):
+            errors = body.get("errors") or[]
+            raise RuntimeError(f"Cloudflare API error ({response.status_code}): {errors}")
+
+        return body
+
+    # --- UPNP PORT FORWARDING ---
 
     def reconcile_upnp(self, instances: List[Dict[str, Any]]) -> None:
         if not self.config.upnp_enabled:
@@ -436,22 +530,10 @@ class AmpCloudflareSync:
         existing = self.list_existing_managed_upnp_mappings(client)
 
         if self.config.upnp_debug:
-            logging.info(
-                "UPnP reconcile summary: desired=%d existing_managed=%d",
-                len(desired),
-                len(existing),
-            )
+            logging.info("UPnP reconcile summary: desired=%d existing_managed=%d", len(desired), len(existing))
 
         desired_keys = set(desired.keys())
         existing_keys = set(existing.keys())
-
-        if self.config.upnp_debug:
-            missing = sorted(desired_keys - existing_keys)
-            stale = sorted(existing_keys - desired_keys)
-            if missing:
-                logging.info("UPnP missing mappings: %s", ", ".join(missing))
-            if stale:
-                logging.info("UPnP stale mappings: %s", ", ".join(stale))
 
         for key, want in desired.items():
             have = existing.get(key)
@@ -460,7 +542,6 @@ class AmpCloudflareSync:
 
             if have:
                 self.delete_upnp_mapping(client, have["external_port"], have["protocol"])
-
             self.create_upnp_mapping(client, want)
 
         for stale_key in (existing_keys - desired_keys):
@@ -496,21 +577,7 @@ class AmpCloudflareSync:
             return desired
 
         for instance in instances:
-            raw_name = self.pick_first_str(
-                instance,
-                [
-                    "FriendlyName",
-                    "friendly_name",
-                    "DisplayName",
-                    "display_name",
-                    "InstanceName",
-                    "instance_name",
-                    "Name",
-                    "name",
-                    "Title",
-                    "title",
-                ],
-            )
+            raw_name = instance.get("friendly_name") or instance.get("instance_name")
             if not raw_name:
                 continue
 
@@ -518,21 +585,7 @@ class AmpCloudflareSync:
             if instance_name in self.config.ignored_names:
                 continue
 
-            instance_id = self.pick_first_str(
-                instance,
-                [
-                    "InstanceID",
-                    "instance_id",
-                    "instanceId",
-                    "Id",
-                    "id",
-                    "ID",
-                    "UUID",
-                    "Guid",
-                    "GUID",
-                ],
-            ) or instance_name
-
+            instance_id = instance.get("instance_id") or instance_name
             subdomain = self.extract_subdomain(instance_name, domain)
             if not subdomain:
                 continue
@@ -547,16 +600,6 @@ class AmpCloudflareSync:
             else:
                 logging.info("UPnP ports for '%s': none found in AMP network data", raw_name)
 
-            if self.config.upnp_debug:
-                network_rows = instance.get("instance_network_info") or []
-                endpoint_rows = instance.get("application_endpoints") or []
-                logging.info(
-                    "UPnP source rows for '%s': network_info=%d application_endpoints=%d",
-                    raw_name,
-                    len(network_rows) if isinstance(network_rows, list) else 0,
-                    len(endpoint_rows) if isinstance(endpoint_rows, list) else 0,
-                )
-
             for protocol, port in mappings:
                 key = f"{protocol}:{port}"
                 desired[key] = {
@@ -569,50 +612,6 @@ class AmpCloudflareSync:
                 }
 
         return desired
-
-    @staticmethod
-    def extract_instance_ports(instance: Dict[str, Any]) -> List[int]:
-        return sorted({port for _, port in AmpCloudflareSync.extract_instance_port_protocols(instance)})
-
-    @staticmethod
-    def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
-        ports: set[int] = set()
-
-        # Process both network info and app endpoints in one pass.
-        endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or [])
-
-        for endpoint_obj in endpoints:
-            is_dict = isinstance(endpoint_obj, dict)
-
-            # Skip SFTP management ports.
-            display_name = endpoint_obj.get("display_name", "") if is_dict else getattr(endpoint_obj, "display_name", "")
-            description = endpoint_obj.get("description", "") if is_dict else getattr(endpoint_obj, "description", "")
-            name_text = display_name or description
-            if name_text and "sftp" in str(name_text).lower():
-                continue
-
-            # Prefer direct numeric PortInfo.port_number values.
-            port_value = endpoint_obj.get("port_number") if is_dict else getattr(endpoint_obj, "port_number", None)
-            try:
-                if port_value is not None and 1 <= int(port_value) <= 65535:
-                    ports.add(int(port_value))
-                    continue
-            except (TypeError, ValueError):
-                pass
-
-            # Fallback to Endpoints.endpoint values such as "0.0.0.0:25565".
-            endpoint_text = endpoint_obj.get("endpoint", "") if is_dict else getattr(endpoint_obj, "endpoint", "")
-            if endpoint_text and ":" in str(endpoint_text):
-                port_text = str(endpoint_text).rsplit(":", 1)[-1].strip()
-                if port_text.isdigit() and 1 <= int(port_text) <= 65535:
-                    ports.add(int(port_text))
-
-        mappings: set[tuple[str, int]] = set()
-        for port in ports:
-            mappings.add(("tcp", port))
-            mappings.add(("udp", port))
-
-        return sorted(mappings, key=lambda x: (x[1], x[0]))
 
     def list_existing_managed_upnp_mappings(self, client: Any) -> Dict[str, Dict[str, Any]]:
         existing: Dict[str, Dict[str, Any]] = {}
@@ -660,9 +659,7 @@ class AmpCloudflareSync:
         conflict: Optional[tuple] = None
         try:
             try:
-                conflict = client.getspecificportmapping(
-                    desired["external_port"], desired["protocol"].upper()
-                )
+                conflict = client.getspecificportmapping(desired["external_port"], desired["protocol"].upper())
             except Exception:
                 conflict = None
 
@@ -670,38 +667,20 @@ class AmpCloudflareSync:
             lease = int(self.config.upnp_lease_seconds)
 
             def add_with_optional_lease(lease_seconds: Optional[int]) -> Any:
-                if lease_seconds is None:
-                    return client.addportmapping(
-                        desired["external_port"],
-                        protocol,
-                        desired["internal_client"],
-                        desired["internal_port"],
-                        desired["description"],
-                        "",
-                    )
-                return client.addportmapping(
-                    desired["external_port"],
-                    protocol,
-                    desired["internal_client"],
-                    desired["internal_port"],
-                    desired["description"],
-                    "",
-                    lease_seconds,
-                )
+                args = [
+                    desired["external_port"], protocol, desired["internal_client"],
+                    desired["internal_port"], desired["description"], ""
+                ]
+                if lease_seconds is not None:
+                    args.append(lease_seconds)
+                return client.addportmapping(*args)
 
             try:
                 ok = add_with_optional_lease(lease)
             except TypeError:
                 ok = add_with_optional_lease(None)
 
-            # Some OpenWrt/miniupnpd setups reject explicit lease=0 but accept gateway-default lease.
             if ok is False and lease == 0:
-                if self.config.upnp_debug:
-                    logging.info(
-                        "UPnP lease=0 rejected for %s/%s; retrying with gateway default lease",
-                        desired["external_port"],
-                        protocol,
-                    )
                 ok = add_with_optional_lease(None)
 
             if ok is False:
@@ -709,38 +688,19 @@ class AmpCloudflareSync:
 
             logging.info(
                 "Created UPnP mapping %s/%s -> %s:%s for instance '%s'",
-                desired["external_port"],
-                protocol,
-                desired["internal_client"],
-                desired["internal_port"],
-                desired["instance_name"],
+                desired["external_port"], protocol, desired["internal_client"],
+                desired["internal_port"], desired["instance_name"],
             )
         except Exception as exc:
             if self.config.upnp_debug and conflict:
-                try:
-                    existing_client, existing_port = conflict[1]
-                    existing_desc = conflict[2]
-                    logging.warning(
-                        "UPnP conflict for %s/%s already mapped to %s:%s desc='%s'",
-                        desired["external_port"],
-                        desired["protocol"].upper(),
-                        existing_client,
-                        existing_port,
-                        existing_desc,
-                    )
-                except Exception:
-                    logging.warning(
-                        "UPnP conflict data for %s/%s: %r",
-                        desired["external_port"],
-                        desired["protocol"].upper(),
-                        conflict,
-                    )
-
+                logging.warning(
+                    "UPnP conflict for %s/%s. Already mapped to %s. Details: %r",
+                    desired["external_port"], desired["protocol"].upper(),
+                    desired["internal_client"], conflict
+                )
             logging.warning(
                 "Failed to create UPnP mapping %s/%s: %s",
-                desired["external_port"],
-                desired["protocol"].upper(),
-                exc,
+                desired["external_port"], desired["protocol"].upper(), exc,
             )
 
     def delete_upnp_mapping(self, client: Any, external_port: int, protocol: str) -> None:
@@ -752,214 +712,7 @@ class AmpCloudflareSync:
         except Exception as exc:
             logging.warning("Failed to delete UPnP mapping %s/%s: %s", external_port, protocol.upper(), exc)
 
-    @staticmethod
-    def is_private_or_loopback_target(target: Optional[str]) -> bool:
-        if not target:
-            return True
-
-        value = target.strip().rstrip(".")
-        if not value:
-            return True
-
-        try:
-            ip = ipaddress.ip_address(value)
-            return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
-        except ValueError:
-            try:
-                infos = socket.getaddrinfo(value, None)
-            except socket.gaierror:
-                return False
-
-            for info in infos:
-                addr = info[4][0]
-                try:
-                    ip = ipaddress.ip_address(addr)
-                except ValueError:
-                    continue
-                if ip.is_private or ip.is_loopback or ip.is_link_local:
-                    return True
-
-            return False
-
-    def list_existing_managed_dns_records(self) -> Dict[str, List[Dict[str, Any]]]:
-        records_by_comment: Dict[str, List[Dict[str, Any]]] = {}
-        page = 1
-
-        while True:
-            result = self.cloudflare_request(
-                "GET",
-                f"/zones/{self.config.cloudflare_zone_id}/dns_records",
-                params={"page": page, "per_page": 500},
-            )
-
-            records = result.get("result", [])
-            if not records:
-                break
-
-            for record in records:
-                comment = (record.get("comment") or "").strip()
-                if not comment.startswith("amp-sync:"):
-                    continue
-                records_by_comment.setdefault(comment, []).append(record)
-
-            info = result.get("result_info") or {}
-            total_pages = int(info.get("total_pages") or 1)
-            if page >= total_pages:
-                break
-            page += 1
-
-        return records_by_comment
-
-    def reconcile(
-        self,
-        desired: Dict[str, Dict[str, Any]],
-        existing_by_comment: Dict[str, List[Dict[str, Any]]],
-    ) -> None:
-        desired_keys = set(desired.keys())
-        existing_keys = set(existing_by_comment.keys())
-
-        for comment, want in desired.items():
-            existing_list = existing_by_comment.get(comment, [])
-            if not existing_list:
-                self.create_record(want)
-                continue
-
-            primary = existing_list[0]
-            if not self.record_matches(primary, want):
-                self.update_record(primary["id"], want)
-
-            for duplicate in existing_list[1:]:
-                self.delete_record(duplicate["id"], duplicate.get("name", "<unknown>"))
-
-        stale_keys = existing_keys - desired_keys
-        for stale_comment in stale_keys:
-            for stale_record in existing_by_comment.get(stale_comment, []):
-                self.delete_record(stale_record["id"], stale_record.get("name", "<unknown>"))
-
-    def create_record(self, want: Dict[str, Any]) -> None:
-        payload = self.make_record_payload(want)
-        self.cloudflare_request(
-            "POST",
-            f"/zones/{self.config.cloudflare_zone_id}/dns_records",
-            json_data=payload,
-        )
-        logging.info(
-            "Created %s %s -> %s for instance '%s'",
-            want["record_type"],
-            want["record_name"],
-            want["content"],
-            want["instance_name"],
-        )
-
-    def update_record(self, record_id: str, want: Dict[str, Any]) -> None:
-        payload = self.make_record_payload(want)
-        self.cloudflare_request(
-            "PUT",
-            f"/zones/{self.config.cloudflare_zone_id}/dns_records/{record_id}",
-            json_data=payload,
-        )
-        logging.info(
-            "Updated %s %s -> %s for instance '%s'",
-            want["record_type"],
-            want["record_name"],
-            want["content"],
-            want["instance_name"],
-        )
-
-    def delete_record(self, record_id: str, record_name: str) -> None:
-        self.cloudflare_request(
-            "DELETE",
-            f"/zones/{self.config.cloudflare_zone_id}/dns_records/{record_id}",
-        )
-        logging.info("Deleted managed DNS record %s", record_name)
-
-    def record_matches(self, existing: Dict[str, Any], want: Dict[str, Any]) -> bool:
-        existing_name = (existing.get("name") or "").lower().strip(".")
-        want_name = f"{want['record_name']}.{self.config.allowed_domain}".lower().strip(".")
-
-        if existing_name != want_name:
-            return False
-
-        if (existing.get("type") or "").upper() != want["record_type"]:
-            return False
-
-        if int(existing.get("ttl") or 1) != int(self.config.dns_ttl):
-            return False
-
-        existing_content = str(existing.get("content") or "").rstrip(".")
-        want_content = str(want["content"]).rstrip(".")
-        if existing_content != want_content:
-            return False
-
-        existing_proxied = bool(existing.get("proxied", False))
-        if existing_proxied != self.config.dns_proxied:
-            return False
-
-        return True
-
-    def make_record_payload(self, want: Dict[str, Any]) -> Dict[str, Any]:
-        payload = {
-            "type": want["record_type"],
-            "name": want["record_name"],
-            "content": want["content"],
-            "ttl": self.config.dns_ttl,
-            "comment": want["comment"],
-        }
-        if want["record_type"] in ("A", "AAAA", "CNAME"):
-            payload["proxied"] = self.config.dns_proxied
-        return payload
-
-    def cloudflare_request(
-        self,
-        method: str,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        url = f"https://api.cloudflare.com/client/v4{path}"
-        headers = {
-            "Authorization": f"Bearer {self.config.cloudflare_api_token}",
-            "Content-Type": "application/json",
-        }
-
-        response = self.http.request(
-            method=method,
-            url=url,
-            headers=headers,
-            params=params,
-            json=json_data,
-            timeout=25,
-        )
-
-        try:
-            body = response.json()
-        except json.JSONDecodeError:
-            response.raise_for_status()
-            raise RuntimeError(f"Cloudflare returned non-JSON response: {response.text}")
-
-        if not response.ok or not body.get("success", False):
-            errors = body.get("errors") or []
-            raise RuntimeError(f"Cloudflare API error ({response.status_code}): {errors}")
-
-        return body
-
-    @staticmethod
-    def pick_first_str(data: Dict[str, Any], keys: List[str]) -> Optional[str]:
-        for key in keys:
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return None
-
-    @staticmethod
-    def pick_first_int(data: Dict[str, Any], keys: List[str]) -> Optional[int]:
-        for key in keys:
-            value = data.get(key)
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-        return None
+    # --- UTILITIES & CONFIG ---
 
     @staticmethod
     def extract_subdomain(instance_name: str, domain: str) -> Optional[str]:
@@ -973,7 +726,6 @@ class AmpCloudflareSync:
         if not subdomain:
             return None
 
-        # Permit multi-level labels but block invalid host chars.
         if not re.fullmatch(r"[a-z0-9.-]+", subdomain):
             return None
 
@@ -987,11 +739,33 @@ class AmpCloudflareSync:
     def infer_record_type(target: str) -> str:
         try:
             ip = ipaddress.ip_address(target)
-            if isinstance(ip, ipaddress.IPv4Address):
-                return "A"
-            return "AAAA"
+            return "A" if isinstance(ip, ipaddress.IPv4Address) else "AAAA"
         except ValueError:
             return "CNAME"
+
+    @staticmethod
+    def is_private_or_loopback_target(target: Optional[str]) -> bool:
+        if not target:
+            return True
+        value = target.strip().rstrip(".")
+        if not value:
+            return True
+        try:
+            ip = ipaddress.ip_address(value)
+            return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(value, None)
+            except socket.gaierror:
+                return False
+            for info in infos:
+                try:
+                    ip = ipaddress.ip_address(info[4][0])
+                    if ip.is_private or ip.is_loopback or ip.is_link_local:
+                        return True
+                except ValueError:
+                    continue
+            return False
 
     @staticmethod
     def parse_bool(value: str, default: bool = False) -> bool:
@@ -1005,9 +779,7 @@ class AmpCloudflareSync:
             logging.info("Periodic sync disabled")
             return
 
-        logging.info(
-            "Periodic sync enabled every %d seconds", self.config.periodic_sync_seconds
-        )
+        logging.info("Periodic sync enabled every %d seconds", self.config.periodic_sync_seconds)
         while True:
             time.sleep(self.config.periodic_sync_seconds)
             try:
@@ -1026,12 +798,7 @@ def get_required_env(name: str) -> str:
 def parse_config() -> Config:
     load_env_file(".env")
 
-    ignored = [
-        x.strip().lower()
-        for x in os.getenv("IGNORE_INSTANCE_NAMES", "").split(",")
-        if x.strip()
-    ]
-
+    ignored =[x.strip().lower() for x in os.getenv("IGNORE_INSTANCE_NAMES", "").split(",") if x.strip()]
     amp_username = os.getenv("AMP_USERNAME", "").strip()
     amp_password = os.getenv("AMP_PASSWORD", "").strip()
 
@@ -1051,9 +818,7 @@ def parse_config() -> Config:
         default_target=os.getenv("DEFAULT_TARGET", "").strip(),
         ignored_names=ignored,
         public_ip_source_record=os.getenv("PUBLIC_IP_SOURCE_RECORD", "").strip(),
-        prefer_public_ip_source=AmpCloudflareSync.parse_bool(
-            os.getenv("PREFER_PUBLIC_IP_SOURCE", "true"), default=True
-        ),
+        prefer_public_ip_source=AmpCloudflareSync.parse_bool(os.getenv("PREFER_PUBLIC_IP_SOURCE", "true"), default=True),
         upnp_enabled=AmpCloudflareSync.parse_bool(os.getenv("UPNP_ENABLED", "false"), default=False),
         upnp_debug=AmpCloudflareSync.parse_bool(os.getenv("UPNP_DEBUG", "false"), default=False),
         upnp_internal_client=os.getenv("UPNP_INTERNAL_CLIENT", "").strip(),
@@ -1063,16 +828,12 @@ def parse_config() -> Config:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
     config = parse_config()
     sync = AmpCloudflareSync(config)
 
     try:
-        # Ensure DNS starts in a correct state on startup.
         sync.run_sync("startup")
         sync.run_periodic_loop()
     except KeyboardInterrupt:
