@@ -639,7 +639,12 @@ class AmpCloudflareSync:
                     continue
                 if AmpCloudflareSync.is_sftp_management_row(row):
                     continue
-                port = AmpCloudflareSync.api_port_value(row.get("port_number"))
+                port = AmpCloudflareSync.api_port_value(
+                    row.get("port_number")
+                    or row.get("PortNumber")
+                    or row.get("port")
+                    or row.get("Port")
+                )
                 if port is not None:
                     ports.add(port)
 
@@ -652,7 +657,7 @@ class AmpCloudflareSync:
                 if AmpCloudflareSync.is_sftp_management_row(endpoint_obj):
                     continue
 
-                endpoint_str = endpoint_obj.get("endpoint")
+                endpoint_str = endpoint_obj.get("endpoint") or endpoint_obj.get("Endpoint")
                 if isinstance(endpoint_str, str) and ":" in endpoint_str:
                     try:
                         port_str = endpoint_str.rsplit(":", 1)[1].strip()
@@ -663,7 +668,7 @@ class AmpCloudflareSync:
                     except (ValueError, IndexError):
                         pass
 
-                uri_str = endpoint_obj.get("uri")
+                uri_str = endpoint_obj.get("uri") or endpoint_obj.get("Uri")
                 endpoint_port = AmpCloudflareSync.api_endpoint_port(uri_str)
                 if endpoint_port is not None:
                     ports.add(endpoint_port)
