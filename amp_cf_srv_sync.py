@@ -149,8 +149,14 @@ class AmpCloudflareSync:
                 snippet = str(result[0])[:500] if not isinstance(result[0], dict) else json.dumps(result[0])[:500]
                 logging.info("First item type: %s, snippet: %s", type(result[0]).__name__, snippet)
         
+        # Unwrap if we got a list with a single dict that has "available_instances" (AMP response)
+        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "available_instances" in result[0]:
+             logging.info("Unwrapping result[0]['available_instances']")
+             result = result[0]["available_instances"]
+        elif isinstance(result, dict) and "available_instances" in result:
+             result = result["available_instances"]
         # Unwrap if we got a list with a single dict that has "Result"
-        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "Result" in result[0]:
+        elif isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "Result" in result[0]:
              logging.info("Unwrapping result[0]['Result']")
              result = result[0]["Result"]
         elif isinstance(result, dict) and "Result" in result:
@@ -245,9 +251,9 @@ class AmpCloudflareSync:
         return out
 
     async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
-        # Since it's a raw dictionary, the keys match the AMP server directly
-        instance_id = row.get("InstanceID")
-        instance_name = row.get("InstanceName") or row.get("FriendlyName")
+        # Since it's a raw dictionary, the keys might be snake_case based on that output
+        instance_id = row.get("InstanceID") or row.get("instance_id")
+        instance_name = row.get("InstanceName") or row.get("instance_name") or row.get("FriendlyName") or row.get("friendly_name")
 
         endpoint_rows: List[Dict[str, Any]] =[]
         network_rows: List[Dict[str, Any]] =[]
