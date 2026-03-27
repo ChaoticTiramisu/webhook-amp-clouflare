@@ -308,36 +308,12 @@ class AmpCloudflareSync:
         # Combine both endpoint pools into a single list
         endpoints = (instance.get("instance_network_info") or []) + (instance.get("application_endpoints") or[])
 
-        # Identify any ports explicitly labeled as SFTP/Management so we never add them
-        skip_ports: set[int] = set()
         for ep in endpoints:
+            # 1. Skip SFTP or File management ports based on Name OR Description
             name = str(ep.get("display_name") or ep.get("DisplayName") or ep.get("name") or ep.get("Name") or "")
-            if name and ("sftp" in name.lower() or "management" in name.lower()):
-                for key in ("port_number", "PortNumber", "port", "Port"):
-                    val = ep.get(key)
-                    if val is not None:
-                        try:
-                            p = int(val)
-                            if 1 <= p <= 65535:
-                                skip_ports.add(p)
-                        except (ValueError, TypeError):
-                            pass
-                
-                # Also try extracting from string endpoints just for the skip list
-                for key in ("endpoint", "Endpoint", "uri", "Uri"):
-                    val_str = str(ep.get(key) or "").strip()
-                    if ":" in val_str:
-                        last_part = val_str.rsplit(":", 1)[-1]
-                        match = re.search(r"^(\d+)", last_part)
-                        if match:
-                            p = int(match.group(1))
-                            if 1 <= p <= 65535:
-                                skip_ports.add(p)
-
-        for ep in endpoints:
-            # 1. Skip SFTP or File management ports (Name check)
-            name = str(ep.get("display_name") or ep.get("DisplayName") or ep.get("name") or ep.get("Name") or "")
-            if name and ("sftp" in name.lower() or "management" in name.lower()):
+            desc = str(ep.get("description") or ep.get("Description") or "")
+            
+            if "sftp" in name.lower() or "sftp" in desc.lower():
                 continue
 
             base_port = None
@@ -400,8 +376,6 @@ class AmpCloudflareSync:
         # Build UDP/TCP protocol combinations for every found port
         mappings: set[Tuple[str, int]] = set()
         for port in ports:
-            if port in skip_ports:
-                continue
             mappings.add(("tcp", port))
             mappings.add(("udp", port))
 
