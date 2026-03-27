@@ -134,46 +134,40 @@ class AmpCloudflareSync:
 
     async def _fetch_amp_instances_async(self) -> List[Dict[str, Any]]:
         ctrl = await self._ensure_amp_controller_async()
+        result = await ctrl.get_instances(include_self=True, format_data=True)
+
+        if not isinstance(result, (list, set, tuple)):
+            raise RuntimeError(f"AMP get_instances returned unexpected type: {type(result).__name__}")
+
         rows: List[Dict[str, Any]] = []
+        for instance_obj in result:
+            row = self._instance_obj_to_row(instance_obj)
+            if row:
+                rows.append(row)
 
-        # Some cc-ampapi versions return instances directly, others expose attrs.
-        result = await ctrl.get_instances(include_self=False, format_data=False)
-        rows.extend(self._normalize_cc_ampapi_rows(result))
-
-        for attr in ("instances", "available_instances", "AvailableInstances"):
-            value = getattr(ctrl, attr, None)
-            extracted = self._normalize_cc_ampapi_rows(value)
-            if extracted:
-                rows.extend(extracted)
-
-        # Fallback: in some AMP setups only include_self=True returns usable data.
-        if not rows:
-            result_self = await ctrl.get_instances(include_self=True, format_data=False)
-            rows.extend(self._normalize_cc_ampapi_rows(result_self))
-            for attr in ("instances", "available_instances", "AvailableInstances"):
-                value = getattr(ctrl, attr, None)
-                extracted = self._normalize_cc_ampapi_rows(value)
-                if extracted:
-                    rows.extend(extracted)
-
-        dedup: Dict[str, Dict[str, Any]] = {}
         for row in rows:
-            key = (
-                str(row.get("InstanceID") or row.get("instance_id") or "")
-                + "|"
-                + str(row.get("FriendlyName") or row.get("friendly_name") or row.get("InstanceName") or row.get("instance_name") or "")
-            )
-            current = dedup.get(key)
-            if current is None:
-                dedup[key] = row
-            else:
-                dedup[key] = self.pick_richer_instance_row(current, row)
-
-        dedup_rows = list(dedup.values())
-        for row in dedup_rows:
             await self.enrich_instance_network_data(ctrl, row)
 
-        return dedup_rows
+        return rows
+
+    @staticmethod
+    def _instance_obj_to_row(instance_obj: Any) -> Dict[str, Any]:
+        row: Dict[str, Any] = {}
+
+        # Documented fields from ampapi.modules.Instance.
+        for src, dst in (
+            ("friendly_name", "FriendlyName"),
+            ("instance_name", "InstanceName"),
+            ("instance_id", "InstanceID"),
+            ("ip", "IP"),
+            ("application_endpoints", "application_endpoints"),
+            ("deployment_args", "deployment_args"),
+        ):
+            value = getattr(instance_obj, src, None)
+            if value is not None:
+                row[dst] = value
+
+        return row
 
     async def enrich_instance_network_data(self, ctrl: Any, row: Dict[str, Any]) -> None:
         instance_id = self.pick_first_str(
@@ -207,26 +201,26 @@ class AmpCloudflareSync:
 
         if instance_id:
             try:
-                endpoint_data = await ctrl.get_application_endpoints(instance_id=instance_id, format_data=False)
+                endpoint_data = await ctrl.get_application_endpoints(instance_id=instance_id, format_data=True)
                 endpoint_rows.extend(self._normalize_endpoint_rows(endpoint_data))
             except Exception as exc:
                 logging.debug("GetApplicationEndpoints failed for %s: %s", instance_id, exc)
 
         if instance_name:
             try:
-                network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=False)
+                network_data = await ctrl.get_instance_network_info(instance_name=instance_name, format_data=True)
                 network_rows.extend(self._normalize_endpoint_rows(network_data))
             except Exception as exc:
                 logging.debug("GetInstanceNetworkInfo failed for %s: %s", instance_name, exc)
 
         if endpoint_rows:
-            existing = row.get("application_endpoints") or row.get("ApplicationEndpoints") or []
+            existing = row.get("application_endpoints") or []
             if not isinstance(existing, list):
                 existing = []
             row["application_endpoints"] = self.merge_endpoint_rows(existing, endpoint_rows)
 
         if network_rows:
-            existing_network = row.get("instance_network_info") or row.get("InstanceNetworkInfo") or []
+            existing_network = row.get("instance_network_info") or []
             if not isinstance(existing_network, list):
                 existing_network = []
             row["instance_network_info"] = self.merge_endpoint_rows(existing_network, network_rows)
@@ -252,11 +246,6 @@ class AmpCloudflareSync:
         if value is None:
             return []
 
-        if hasattr(value, "result"):
-            inner = getattr(value, "result", None)
-            if inner is not None:
-                value = inner
-
         items: List[Any]
         if isinstance(value, (list, tuple, set)):
             items = list(value)
@@ -270,23 +259,18 @@ class AmpCloudflareSync:
                 continue
 
             row: Dict[str, Any] = {}
+            # Documented fields from ampapi.modules.Endpoints and ampapi.modules.PortInfo.
             for src in (
                 "display_name",
-                "DisplayName",
                 "endpoint",
-                "Endpoint",
                 "uri",
-                "Uri",
                 "description",
-                "Description",
                 "port_number",
-                "PortNumber",
                 "protocol",
-                "Protocol",
                 "range",
-                "Range",
                 "provision_node_name",
-                "ProvisionNodeName",
+                "us_user_defined",
+                "verified",
             ):
                 val = getattr(item, src, None)
                 if val is not None:
@@ -296,39 +280,6 @@ class AmpCloudflareSync:
                 out.append(row)
 
         return out
-
-    @staticmethod
-    def pick_richer_instance_row(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
-        left_ports = AmpCloudflareSync.extract_instance_ports(left)
-        right_ports = AmpCloudflareSync.extract_instance_ports(right)
-
-        if len(right_ports) > len(left_ports):
-            return right
-        if len(left_ports) > len(right_ports):
-            return left
-
-        # Prefer the row that actually carries endpoint structures.
-        endpoint_keys = (
-            "application_endpoints",
-            "ApplicationEndpoints",
-            "instance_network_info",
-            "InstanceNetworkInfo",
-            "endpoints",
-            "Endpoints",
-            "network_endpoints",
-            "NetworkEndpoints",
-        )
-        left_has_endpoints = any(bool(left.get(k)) for k in endpoint_keys)
-        right_has_endpoints = any(bool(right.get(k)) for k in endpoint_keys)
-        if right_has_endpoints and not left_has_endpoints:
-            return right
-        if left_has_endpoints and not right_has_endpoints:
-            return left
-
-        # Final tie-breaker: keep the richer dictionary payload.
-        if len(right.keys()) > len(left.keys()):
-            return right
-        return left
 
     async def _close_amp_controller_async(self) -> None:
         if self.amp_controller is None:
@@ -351,84 +302,6 @@ class AmpCloudflareSync:
                 self.amp_loop.close()
         finally:
             self.http.close()
-
-    @staticmethod
-    def _normalize_cc_ampapi_rows(value: Any) -> List[Dict[str, Any]]:
-        if value is None:
-            return []
-
-        # Handle wrapper objects (e.g., ActionResult) that carry list-like payloads.
-        if hasattr(value, "result"):
-            inner = getattr(value, "result", None)
-            if inner is not None:
-                value = inner
-        if hasattr(value, "available_instances"):
-            inner = getattr(value, "available_instances", None)
-            if inner is not None:
-                value = inner
-        if hasattr(value, "instances"):
-            inner = getattr(value, "instances", None)
-            if inner is not None:
-                value = inner
-
-        items: List[Any]
-        if isinstance(value, (list, set, tuple)):
-            items = list(value)
-        else:
-            items = [value]
-
-        out: List[Dict[str, Any]] = []
-        for item in items:
-            if isinstance(item, dict):
-                nested_available = item.get("available_instances")
-                if isinstance(nested_available, (list, tuple, set)):
-                    out.extend(AmpCloudflareSync._normalize_cc_ampapi_rows(nested_available))
-
-                nested_instances = item.get("instances")
-                if isinstance(nested_instances, (list, tuple, set)):
-                    out.extend(AmpCloudflareSync._normalize_cc_ampapi_rows(nested_instances))
-
-                if any(
-                    k in item
-                    for k in (
-                        "FriendlyName",
-                        "friendly_name",
-                        "InstanceName",
-                        "instance_name",
-                        "Name",
-                        "name",
-                    )
-                ):
-                    out.append(item)
-                continue
-
-            row: Dict[str, Any] = {}
-            for src, dst in (
-                ("friendly_name", "FriendlyName"),
-                ("instance_name", "InstanceName"),
-                ("instance_id", "InstanceID"),
-                ("ip", "IP"),
-                ("host", "Host"),
-                ("address", "Address"),
-                ("public_address", "PublicAddress"),
-                ("application_endpoints", "ApplicationEndpoints"),
-                ("ApplicationEndpoints", "ApplicationEndpoints"),
-                ("deployment_args", "DeploymentArgs"),
-                ("DeploymentArgs", "DeploymentArgs"),
-            ):
-                val = getattr(item, src, None)
-                if val is not None:
-                    # For complex fields like ApplicationEndpoints and DeploymentArgs,
-                    # preserve them even if they're not strings.
-                    if src in ("application_endpoints", "ApplicationEndpoints", "deployment_args", "DeploymentArgs"):
-                        row[dst] = val
-                    elif isinstance(val, str) and val:
-                        row[dst] = val
-
-            if row:
-                out.append(row)
-
-        return out
 
     def build_desired_records(self, instances: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         desired: Dict[str, Dict[str, Any]] = {}
@@ -758,21 +631,29 @@ class AmpCloudflareSync:
     def extract_instance_port_protocols(instance: Dict[str, Any]) -> List[tuple[str, int]]:
         ports: set[int] = set()
 
-        # Source 1: ApplicationEndpoints array from GetInstances response.
-        app_endpoints = instance.get("ApplicationEndpoints") or []
+        # Source 1: ADSModule.get_instance_network_info -> list[PortInfo].
+        network_rows = instance.get("instance_network_info") or []
+        if isinstance(network_rows, list):
+            for row in network_rows:
+                if not isinstance(row, dict):
+                    continue
+                if AmpCloudflareSync.is_sftp_management_row(row):
+                    continue
+                port = AmpCloudflareSync.api_port_value(row.get("port_number"))
+                if port is not None:
+                    ports.add(port)
+
+        # Source 2: Instance.application_endpoints / ADSModule.get_application_endpoints.
+        app_endpoints = instance.get("application_endpoints") or []
         if isinstance(app_endpoints, list):
             for endpoint_obj in app_endpoints:
                 if not isinstance(endpoint_obj, dict):
                     continue
-
-                # Skip SFTP endpoints.
-                display_name = endpoint_obj.get("DisplayName") or ""
-                if "sftp" in display_name.lower():
+                if AmpCloudflareSync.is_sftp_management_row(endpoint_obj):
                     continue
 
-                # Extract port from Endpoint field: "0.0.0.0:7777" or "hostname:port".
-                endpoint_str = endpoint_obj.get("Endpoint") or ""
-                if endpoint_str and ":" in endpoint_str:
+                endpoint_str = endpoint_obj.get("endpoint")
+                if isinstance(endpoint_str, str) and ":" in endpoint_str:
                     try:
                         port_str = endpoint_str.rsplit(":", 1)[1].strip()
                         if port_str.isdigit():
@@ -782,29 +663,10 @@ class AmpCloudflareSync:
                     except (ValueError, IndexError):
                         pass
 
-                # Extract port from Uri field if it contains scheme (e.g., "tcp://host:port").
-                uri_str = endpoint_obj.get("Uri") or ""
-                if uri_str and "://" in uri_str:
-                    endpoint_port = AmpCloudflareSync.api_endpoint_port(uri_str)
-                    if endpoint_port:
-                        ports.add(endpoint_port)
-
-        # Source 2: DeploymentArgs["GenericModule.App.Ports"] - JSON string with port definitions.
-        deployment_args = instance.get("DeploymentArgs") or {}
-        if isinstance(deployment_args, dict):
-            ports_json_str = deployment_args.get("GenericModule.App.Ports") or ""
-            if isinstance(ports_json_str, str) and ports_json_str.strip():
-                try:
-                    ports_list = json.loads(ports_json_str)
-                    if isinstance(ports_list, list):
-                        for port_def in ports_list:
-                            if not isinstance(port_def, dict):
-                                continue
-                            port = port_def.get("Port")
-                            if isinstance(port, int) and 1 <= port <= 65535:
-                                ports.add(port)
-                except Exception:
-                    pass
+                uri_str = endpoint_obj.get("uri")
+                endpoint_port = AmpCloudflareSync.api_endpoint_port(uri_str)
+                if endpoint_port is not None:
+                    ports.add(endpoint_port)
 
         mappings: set[tuple[str, int]] = set()
         for port in ports:

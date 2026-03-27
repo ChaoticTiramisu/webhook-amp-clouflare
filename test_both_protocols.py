@@ -29,26 +29,29 @@ sync = AmpCloudflareSync(cfg)
 instance = {
     "FriendlyName": "mc.game.cobyas.xyz",
     "InstanceID": "abc",
-    "ApplicationEndpoints": [
-        {"DisplayName": "Minecraft Server Address", "Endpoint": "0.0.0.0:25565", "Uri": ""},
-        {"DisplayName": "SFTP Server", "Endpoint": "0.0.0.0:2224", "Uri": "sftp://0.0.0.0:2224"},
+    "application_endpoints": [
+        {"display_name": "Minecraft Server Address", "endpoint": "0.0.0.0:25565", "uri": ""},
+        {"display_name": "SFTP Server", "endpoint": "0.0.0.0:2224", "uri": "sftp://0.0.0.0:2224"},
     ],
-    "DeploymentArgs": {
-        "MinecraftModule.Minecraft.PortNumber": "25565",
-    },
+    "instance_network_info": [
+        {"description": "Minecraft", "port_number": 25565, "protocol": 0, "provision_node_name": "", "range": 1, "us_user_defined": False, "verified": True},
+        {"description": "SFTP", "port_number": 2224, "protocol": 0, "provision_node_name": "", "range": 1, "us_user_defined": False, "verified": True},
+    ],
 }
 print("Minecraft extracted:", sync.extract_instance_port_protocols(instance))
 
 instance2 = {
     "FriendlyName": "satisfactory.game.cobyas.xyz",
     "InstanceID": "def",
-    "ApplicationEndpoints": [
-        {"DisplayName": "Application Address", "Endpoint": "0.0.0.0:7777", "Uri": "0.0.0.0:7777"},
-        {"DisplayName": "SFTP Server", "Endpoint": "0.0.0.0:2225", "Uri": "sftp://0.0.0.0:2225"},
+    "application_endpoints": [
+        {"display_name": "Application Address", "endpoint": "0.0.0.0:7777", "uri": "0.0.0.0:7777"},
+        {"display_name": "SFTP Server", "endpoint": "0.0.0.0:2225", "uri": "sftp://0.0.0.0:2225"},
     ],
-    "DeploymentArgs": {
-        "GenericModule.App.Ports": '[{"Protocol":2,"Port":7777,"Range":1},{"Protocol":1,"Port":8888,"Range":1}]',
-    },
+    "instance_network_info": [
+        {"description": "Application", "port_number": 7777, "protocol": 0, "provision_node_name": "", "range": 1, "us_user_defined": False, "verified": True},
+        {"description": "Query", "port_number": 8888, "protocol": 0, "provision_node_name": "", "range": 1, "us_user_defined": False, "verified": True},
+        {"description": "SFTP", "port_number": 2225, "protocol": 0, "provision_node_name": "", "range": 1, "us_user_defined": False, "verified": True},
+    ],
 }
 print("Satisfactory extracted:", sync.extract_instance_port_protocols(instance2))
 
@@ -61,12 +64,12 @@ print("Random game input ports:", rand_game_ports, "(sftp:", rand_sftp_port, ")"
 instance3 = {
     "FriendlyName": "valheim.game.cobyas.xyz",
     "InstanceID": "ghi",
-    "ApplicationEndpoints": [
-        {"DisplayName": "SFTP Server", "Endpoint": f"0.0.0.0:{rand_sftp_port}", "Uri": f"sftp://0.0.0.0:{rand_sftp_port}"},
-        {"DisplayName": "Game Port 1", "Endpoint": f"0.0.0.0:{rand_game_ports[0]}", "Uri": ""},
-        {"DisplayName": "Game Port 2", "Endpoint": f"0.0.0.0:{rand_game_ports[1]}", "Uri": ""},
-        {"DisplayName": "Game Port 3", "Endpoint": f"0.0.0.0:{rand_game_ports[2]}", "Uri": ""},
+    "application_endpoints": [
+        {"display_name": "SFTP Server", "endpoint": f"0.0.0.0:{rand_sftp_port}", "uri": f"sftp://0.0.0.0:{rand_sftp_port}"},
+        {"display_name": "Game Port 1", "endpoint": f"0.0.0.0:{rand_game_ports[0]}", "uri": ""},
+        {"display_name": "Game Port 2", "endpoint": f"0.0.0.0:{rand_game_ports[1]}", "uri": ""},
+        {"display_name": "Game Port 3", "endpoint": f"0.0.0.0:{rand_game_ports[2]}", "uri": ""},
     ],
-    "DeploymentArgs": {},
+    "instance_network_info": [],
 }
 print("Valheim extracted:", sync.extract_instance_port_protocols(instance3))
