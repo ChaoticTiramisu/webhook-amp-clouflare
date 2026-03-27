@@ -140,15 +140,29 @@ class AmpCloudflareSync:
         
         # FIX: Set format_data=False to get raw dictionaries as per the docs
         result = await ctrl.get_instances(include_self=True, format_data=False)
+        logging.info("Raw result type: %s", type(result).__name__)
+
+        # Unwrap if we got a list with a single dict that has "Result"
+        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "Result" in result[0]:
+             logging.info("Unwrapping result[0]['Result']")
+             result = result[0]["Result"]
+        elif isinstance(result, dict) and "Result" in result:
+             result = result["Result"]
 
         if not isinstance(result, (list, set, tuple)):
+            try:
+                logging.info("Unexpected result: %s", json.dumps(result)[:200])
+            except: pass
             raise RuntimeError(f"AMP get_instances returned unexpected type: {type(result).__name__}")
 
         rows: List[Dict[str, Any]] =[]
         for instance_obj in result:
-            # We don't need _instance_obj_to_row anymore if it's already a dict!
             if isinstance(instance_obj, dict):
                 rows.append(instance_obj)
+            else:
+                logging.info("Skipping non-dict instance_obj: %s", type(instance_obj).__name__)
+
+        logging.info("Found %d raw dict rows", len(rows))
 
         for row in rows:
             await self.enrich_instance_network_data(ctrl, row)
