@@ -599,6 +599,7 @@ class AmpCloudflareSync:
             if not subdomain:
                 continue
 
+            self.log_upnp_source_rows(raw_name, instance)
             mappings = self.extract_instance_port_protocols(instance)
             if mappings:
                 logging.info(
@@ -621,6 +622,57 @@ class AmpCloudflareSync:
                 }
 
         return desired
+
+    def log_upnp_source_rows(self, instance_name: str, instance: Dict[str, Any]) -> None:
+        if not self.config.upnp_debug:
+            return
+
+        network_rows = instance.get("instance_network_info") or []
+        endpoint_rows = instance.get("application_endpoints") or []
+        logging.info(
+            "UPnP source rows for '%s': network_info=%d application_endpoints=%d",
+            instance_name,
+            len(network_rows),
+            len(endpoint_rows),
+        )
+
+        combined = list(network_rows) + list(endpoint_rows)
+        max_rows = 12
+        for idx, ep in enumerate(combined[:max_rows], start=1):
+            if not isinstance(ep, dict):
+                logging.info(
+                    "UPnP row %d for '%s': non-dict type=%s value=%r",
+                    idx,
+                    instance_name,
+                    type(ep).__name__,
+                    ep,
+                )
+                continue
+
+            name = ep.get("display_name") or ep.get("DisplayName") or ep.get("name") or ep.get("Name")
+            port = ep.get("port_number") or ep.get("PortNumber") or ep.get("port") or ep.get("Port")
+            endpoint = ep.get("endpoint") or ep.get("Endpoint")
+            uri = ep.get("uri") or ep.get("Uri")
+            protocol = ep.get("protocol") or ep.get("Protocol")
+
+            logging.info(
+                "UPnP row %d for '%s': name=%r port=%r endpoint=%r uri=%r protocol=%r keys=%s",
+                idx,
+                instance_name,
+                name,
+                port,
+                endpoint,
+                uri,
+                protocol,
+                sorted(ep.keys()),
+            )
+
+        if len(combined) > max_rows:
+            logging.info(
+                "UPnP debug for '%s': %d additional rows not shown",
+                instance_name,
+                len(combined) - max_rows,
+            )
 
     def list_existing_managed_upnp_mappings(self, client: Any) -> Dict[str, Dict[str, Any]]:
         existing: Dict[str, Dict[str, Any]] = {}
